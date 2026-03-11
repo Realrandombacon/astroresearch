@@ -1829,20 +1829,114 @@ def execute_tool(tool_name, params, memory=None):
         return {"error": str(e)}
 
 def log_finding(ra=0, dec=0, description="", significance="medium", **kwargs):
-    """Log a potential astronomical finding."""
+    """Log a potential astronomical finding with quality checks."""
+
+    # ── Quality gate: reject low-quality findings with explanation ──
+    desc_lower = description.lower()
+    reasons = []  # collect ALL rejection reasons to give Qwen full feedback
+
+    # 1. Description too short — no scientific value
+    if len(description) < 50:
+        reasons.append(
+            "DESCRIPTION TOO SHORT: Your finding description must include "
+            "magnitude values, SNR, MJD epochs, and which catalogs were checked. "
+            f"You wrote only {len(description)} chars — minimum is 50."
+        )
+
+    # 2. Extract SNR from description to reject noise detections
+    import re
+    snr_matches = re.findall(r'SNR\s*[=:]\s*(\d+(?:\.\d+)?)', description, re.IGNORECASE)
+    if snr_matches:
+        max_snr = max(float(s) for s in snr_matches)
+        if max_snr < 3.0 and significance == "high":
+            reasons.append(
+                f"SNR TOO LOW FOR HIGH SIGNIFICANCE: You reported SNR={max_snr:.1f} "
+                f"but marked significance='high'. A detection with SNR < 3 is NOT "
+                f"statistically significant — it's indistinguishable from noise. "
+                f"Either downgrade to significance='low' or investigate further to "
+                f"get a stronger detection."
+            )
+
+    # 3. Extract Δmag to reject photometric noise
+    dmag_matches = re.findall(
+        r'[Δδ]?\s*mag\s*[=:]\s*[+-]?(0\.\d+)|'
+        r'delta\s*[=:]?\s*[+-]?(0\.\d+)\s*mag|'
+        r'(\d+\.\d+)\s*(?:mag|→)\s*(\d+\.\d+)',
+        description, re.IGNORECASE
+    )
+    if dmag_matches:
+        # Try to find explicit Δmag values
+        for m in dmag_matches:
+            if m[0]:  # Δmag=0.xx pattern
+                dmag = float(m[0])
+                if dmag < 0.3 and significance in ("high", "medium"):
+                    reasons.append(
+                        f"MAGNITUDE CHANGE TOO SMALL: Δmag={dmag:.2f} is within "
+                        f"Pan-STARRS photometric uncertainty (~0.1-0.2 mag for faint "
+                        f"sources). A real transient should show Δmag ≥ 0.3. "
+                        f"This is likely measurement noise, not a real event."
+                    )
+                    break
+            elif m[1]:  # delta=0.xx mag pattern
+                dmag = float(m[1])
+                if dmag < 0.3 and significance in ("high", "medium"):
+                    reasons.append(
+                        f"MAGNITUDE CHANGE TOO SMALL: Δmag={dmag:.2f} is within "
+                        f"photometric noise. Real transients show Δmag ≥ 0.3."
+                    )
+                    break
+
+    # 4. Duplicate check — same coords within 1° already logged
+    if os.path.exists(FINDINGS_FILE):
+        try:
+            with open(FINDINGS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 4 and parts[0] != "id":
+                        try:
+                            ex_ra, ex_dec = float(parts[2]), float(parts[3])
+                            if abs(ex_ra - float(ra)) < 1.0 and abs(ex_dec - float(dec)) < 1.0:
+                                reasons.append(
+                                    f"DUPLICATE: A finding already exists near RA={ex_ra}, "
+                                    f"Dec={ex_dec} (finding {parts[0]}). Do NOT log the same "
+                                    f"source twice. If you have NEW information about it, "
+                                    f"use add_note() instead."
+                                )
+                                break
+                        except (ValueError, TypeError):
+                            continue
+        except Exception:
+            pass
+
+    # ── If any quality issues found, REJECT with full explanation ──
+    if reasons:
+        log("WARN", f"Finding REJECTED at RA={ra}, Dec={dec}: {reasons[0][:80]}")
+        return {
+            "status": "rejected",
+            "REJECTED": True,
+            "reasons": reasons,
+            "explanation": (
+                "Your finding was REJECTED because it did not pass quality checks. "
+                "Review the reasons above and either: "
+                "(1) fix the issue and call log_finding again with better data, or "
+                "(2) continue investigating with more photometry/validation before logging."
+            ),
+        }
+
+    # ── Quality OK — log the finding ──
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     finding_id = f"F{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
+
     finding_path = os.path.join(FINDINGS_DIR, f"{finding_id}.json")
-    
+
     # Append to findings.tsv
     if not os.path.exists(FINDINGS_FILE):
         with open(FINDINGS_FILE, "w") as f:
             f.write("id\ttimestamp\tra\tdec\tsignificance\tdescription\n")
-    
+
     with open(FINDINGS_FILE, "a", encoding="utf-8") as f:
         f.write(f"{finding_id}\t{timestamp}\t{ra}\t{dec}\t{significance}\t{description}\n")
-    
+
     # Save detailed JSON
     with open(finding_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -1854,9 +1948,9 @@ def log_finding(ra=0, dec=0, description="", significance="medium", **kwargs):
             "description": description,
             "extra": kwargs,
         }, f, indent=2)
-    
+
     log("FIND", f"Logged finding {finding_id}: {description[:80]}", ra=ra, dec=dec)
-    
+
     return {"status": "logged", "finding_id": finding_id}
 
 
