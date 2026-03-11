@@ -686,10 +686,27 @@ def measure_photometry(image_path, ra, dec, aperture_radius=5,
     # Check if target is within image bounds (with margin for sky annulus)
     margin = sky_outer + 2
     if cx_int < margin or cx_int >= nx - margin or cy_int < margin or cy_int >= ny - margin:
+        # Calculate how far off-image the target is to give a helpful error
+        # Extract image center RA/Dec from filename or WCS
+        img_center_ra = header.get("CRVAL1", None)
+        img_center_dec = header.get("CRVAL2", None)
+        offset_hint = ""
+        if img_center_ra is not None and img_center_dec is not None:
+            # Estimate angular separation
+            dra = abs(ra - float(img_center_ra)) * np.cos(np.radians(dec))
+            ddec = abs(dec - float(img_center_dec))
+            sep_arcmin = np.sqrt(dra**2 + ddec**2) * 60
+            fov_arcmin = nx * 0.25 / 60  # approximate FOV in arcmin
+            if sep_arcmin > fov_arcmin * 2:
+                offset_hint = (
+                    f" WRONG IMAGE: Target (RA={ra}, Dec={dec}) is {sep_arcmin:.1f} arcmin from "
+                    f"image center (RA={float(img_center_ra):.4f}, Dec={float(img_center_dec):.4f}), "
+                    f"but image FOV is only ~{fov_arcmin:.1f} arcmin. "
+                    f"Use list_images() to find the correct image for this target, or "
+                    f"download_cutout(ra={ra}, dec={dec}) to get an image centered on it."
+                )
         return {
-            "error": f"Target position (pixel {cx_int},{cy_int}) is too close to edge "
-                     f"or outside image ({nx}x{ny}). The sky annulus (r={sky_outer}px) "
-                     f"would extend beyond the image boundary.",
+            "error": f"Target position (pixel {cx_int},{cy_int}) is outside image ({nx}x{ny}).{offset_hint}",
             "pixel_x": round(cx, 1),
             "pixel_y": round(cy, 1),
             "image_size": f"{nx}x{ny}",

@@ -518,7 +518,7 @@ AVAILABLE_TOOLS = {
         "script": "tools/astro_query.py check-transients --ra {ra} --dec {dec} --radius {radius}",
     },
     "measure_photometry": {
-        "description": "Measure calibrated aperture photometry of a source in a FITS image. Returns magnitude, flux, SNR. Use to get precise brightness measurements for transient candidates. Requires RA/Dec of the target and a FITS image path.",
+        "description": "Measure calibrated aperture photometry of a source in a FITS image. Returns magnitude, flux, SNR. IMPORTANT: The RA/Dec must be INSIDE the image — use an image centered on that position (check the RA/Dec in the filename matches your target). If you get 'outside image' errors, download_cutout at the target coordinates first.",
         "usage": "measure_photometry(image='data/images/<file>.fits', ra=<degrees>, dec=<degrees>)",
         "script": "tools/image_analysis.py measure-photometry --image {image} --ra {ra} --dec {dec} --aperture {aperture} --inner {inner} --outer {outer}",
     },
