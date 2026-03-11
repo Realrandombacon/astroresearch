@@ -701,6 +701,28 @@ def download_multiepoch(ra, dec, filter_name='g', n_epochs=3, size_arcmin=1.0):
                 with open(fpath, "wb") as f:
                     f.write(img_resp.content)
 
+                # Post-download NaN check: reject blank FITS images
+                nan_frac = 0.0
+                if fmt == "fits":
+                    try:
+                        import numpy as _np
+                        from astropy.io import fits as _fits
+                        with _fits.open(fpath) as _hdul:
+                            for _hdu in _hdul:
+                                if _hdu.data is not None and _hdu.data.ndim >= 2:
+                                    nan_frac = _np.count_nonzero(_np.isnan(_hdu.data)) / _hdu.data.size
+                                    break
+                    except Exception:
+                        pass
+
+                if nan_frac > 0.5:
+                    # Delete blank image and skip this epoch
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+                    continue
+
                 downloaded.append({
                     "file": os.path.join("data", "images", fname),
                     "filter": filter_name,
@@ -709,6 +731,7 @@ def download_multiepoch(ra, dec, filter_name='g', n_epochs=3, size_arcmin=1.0):
                     "date_iso": mjd_to_iso(warp["mjd"]),
                     "size_bytes": len(img_resp.content),
                     "format": fmt,
+                    "nan_fraction": round(nan_frac, 3),
                 })
         except Exception as e:
             # Skip failed downloads, continue with remaining epochs
@@ -720,7 +743,12 @@ def download_multiepoch(ra, dec, filter_name='g', n_epochs=3, size_arcmin=1.0):
 
     if not downloaded:
         return {
-            "error": "All warp cutout downloads failed. PS1 server may be temporarily unavailable.",
+            "error": (
+                "No usable warp images at this position. "
+                "All downloaded warps were blank (100% NaN) — Pan-STARRS has no valid "
+                f"coverage for filter={filter_name} at RA={ra}, Dec={dec}. "
+                "Try a different filter or a position with better coverage (Dec > 0°)."
+            ),
             "query": {"ra": ra, "dec": dec, "filter": filter_name},
             "total_available_epochs": len(warps),
         }
