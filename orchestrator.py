@@ -1118,30 +1118,62 @@ def _list_findings(memory, significance="all", **kwargs):
 
 
 def _list_unexplored(memory, **kwargs):
-    """Show unexplored sky regions and coverage gaps with suggested coordinates."""
-    cov = memory.get("sky_coverage", {})
-    ra_bins = set(cov.get("ra_bins_visited", []))
-    all_bins = set(range(0, 360, 10))
-    missing_bins = sorted(all_bins - ra_bins)
+    """Show unexplored sky regions and coverage gaps with suggested coordinates.
 
-    # Group consecutive missing bins into ranges with center suggestions
+    Uses adaptive bin resolution: starts at 10° RA bins, switches to 2° when
+    all coarse bins are covered. Always generates fresh random coordinates
+    far from existing regions — the sky has ~41,253 sq degrees but each
+    observation covers ~0.0003 sq deg, so there's always something new.
+    """
+    import math
+
+    cov = memory.get("sky_coverage", {})
+    ra_bins_coarse = set(cov.get("ra_bins_visited", []))
+    regions = memory.get("regions", {})
+
+    # Collect all explored coordinates for distance checks
+    explored_coords = []
+    for key, reg in regions.items():
+        explored_coords.append((float(reg.get("ra", 0)), float(reg.get("dec", 0))))
+
+    # --- Adaptive bin resolution ---
+    # Start with 10° bins; if all covered, switch to 2° bins
+    all_coarse = set(range(0, 360, 10))
+    coarse_missing = sorted(all_coarse - ra_bins_coarse)
+
+    if coarse_missing:
+        # Still have 10° gaps — use coarse bins
+        bin_size = 10
+        missing_bins = coarse_missing
+        coverage_label = f"{len(ra_bins_coarse)}/36 (10° bins)"
+    else:
+        # All 10° bins covered — switch to finer 2° bins
+        bin_size = 2
+        fine_bins_visited = set()
+        for ra_val, _ in explored_coords:
+            fine_bins_visited.add(int(ra_val / bin_size) * bin_size)
+        all_fine = set(range(0, 360, bin_size))
+        missing_bins = sorted(all_fine - fine_bins_visited)
+        coverage_label = f"{len(fine_bins_visited)}/{len(all_fine)} (2° bins)"
+
+    # Group consecutive missing bins into gap ranges
     gap_ranges = []
     i = 0
     while i < len(missing_bins):
         start = missing_bins[i]
         end = start
-        while i + 1 < len(missing_bins) and missing_bins[i + 1] == end + 10:
+        while i + 1 < len(missing_bins) and missing_bins[i + 1] == end + bin_size:
             i += 1
             end = missing_bins[i]
-        center_ra = (start + end + 10) / 2.0
+        center_ra = (start + end + bin_size) / 2.0
         gap_ranges.append({
-            "ra_range": f"{start}°–{end + 10}°",
+            "ra_range": f"{start}°–{end + bin_size}°",
             "suggested_ra": round(center_ra, 1),
-            "width_deg": end + 10 - start,
+            "width_deg": end + bin_size - start,
         })
         i += 1
 
-    # Suggest declinations that are underexplored
+    # --- Declination suggestions ---
     dec_min = cov.get("dec_min", 90.0)
     dec_max = cov.get("dec_max", -90.0)
     dec_suggestions = []
@@ -1152,33 +1184,70 @@ def _list_unexplored(memory, **kwargs):
     if dec_min > 0:
         dec_suggestions.append({"dec": -15.0, "reason": "Negative declinations not yet visited"})
 
-    # Pick top 5 suggested coordinates (center of biggest gaps)
+    # --- Generate suggested coordinates ---
+    # Strategy: combine gap-based suggestions with random "far from anything" coords
     gap_ranges.sort(key=lambda g: g["width_deg"], reverse=True)
     suggested_coords = []
-    for gap in gap_ranges[:5]:
-        # Use a mid-range Dec for the suggestion
-        suggested_dec = round((dec_min + dec_max) / 2, 1) if dec_min < dec_max else 20.0
-        # Add slight random offset to avoid always suggesting the same thing
-        jitter_dec = round(random.uniform(-10, 10), 1)
-        suggested_dec = max(-80, min(80, suggested_dec + jitter_dec))
+
+    # 1) Gap-based suggestions (from RA gaps)
+    for gap in gap_ranges[:3]:
+        suggested_dec = round(random.uniform(-30, 60), 1)
         suggested_coords.append({
             "ra": gap["suggested_ra"],
             "dec": suggested_dec,
             "reason": f"Center of unexplored RA gap {gap['ra_range']}",
         })
 
-    n_explored = len(memory.get("regions", {}))
-    n_ra_bins = len(ra_bins)
+    # 2) Random coordinates far from any explored region
+    # This ensures Qwen ALWAYS gets fresh targets even at "100% coverage"
+    def _min_distance(ra, dec):
+        """Min angular distance (degrees) to any explored region."""
+        if not explored_coords:
+            return 999
+        best = 999
+        cos_dec = math.cos(math.radians(dec))
+        for era, edec in explored_coords:
+            dra = abs(ra - era) * cos_dec
+            if dra > 180 * cos_dec:
+                dra = 360 * cos_dec - dra
+            ddec = abs(dec - edec)
+            dist = math.sqrt(dra ** 2 + ddec ** 2)
+            if dist < best:
+                best = dist
+        return best
+
+    # Generate candidates and keep the ones farthest from anything explored
+    candidates = []
+    for _ in range(200):
+        rand_ra = round(random.uniform(0, 360), 4)
+        # Favor Dec -30 to +70 for best survey coverage
+        rand_dec = round(random.uniform(-30, 70), 4)
+        dist = _min_distance(rand_ra, rand_dec)
+        candidates.append((rand_ra, rand_dec, dist))
+
+    # Sort by distance (farthest first) and pick top N
+    candidates.sort(key=lambda c: c[2], reverse=True)
+    n_random = max(2, 5 - len(suggested_coords))
+    for rand_ra, rand_dec, dist in candidates[:n_random]:
+        suggested_coords.append({
+            "ra": rand_ra,
+            "dec": rand_dec,
+            "reason": f"Random unexplored position ({dist:.1f}° from nearest explored region)",
+        })
+
+    n_explored = len(regions)
+    sky_area_explored = n_explored * 0.0003  # ~1 arcmin² per region ≈ 0.0003 sq deg
+    sky_fraction = sky_area_explored / 41253 * 100
 
     return {
-        "sky_coverage_percent": round(n_ra_bins / 36 * 100, 1),
-        "ra_bins_explored": f"{n_ra_bins}/36",
+        "ra_bins_explored": coverage_label,
         "dec_range_explored": f"{dec_min:.0f}° to {dec_max:.0f}°",
         "total_regions_explored": n_explored,
+        "actual_sky_fraction": f"{sky_fraction:.4f}% (the sky is VAST — always room for new discoveries!)",
         "unexplored_ra_gaps": gap_ranges[:8],
         "dec_suggestions": dec_suggestions,
         "suggested_coordinates": suggested_coords,
-        "tip": "Pick a region from suggested_coordinates and use search_region() to start exploring!",
+        "tip": "The sky has 41,253 square degrees — you've barely scratched the surface! Pick any suggested coordinate and explore it.",
     }
 
 
