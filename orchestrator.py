@@ -2174,6 +2174,38 @@ Format (MUST use parentheses):
 """
 
 
+def build_reflection_prompt(cycle_num, turn_num, tool_results):
+    """Build a lightweight prompt showing tool results for mid-cycle reflection.
+
+    Unlike build_user_prompt (which carries full history/memory), this is
+    small and focused: just the results from the tools that just ran, plus
+    a clear instruction to either act on them or signal completion.
+    """
+    results_text = ""
+    for r in tool_results:
+        results_text += f"\n### {r['tool']}({r.get('params', {})}):\n```json\n"
+        result_str = json.dumps(r["result"], indent=2, default=str)
+        if len(result_str) > 1500:
+            result_str = result_str[:1500] + "\n... (truncated)"
+        results_text += result_str + "\n```\n"
+
+    return f"""Cycle {cycle_num}, Turn {turn_num} — REFLECTION
+
+Here are the results from the tools you just called:
+{results_text}
+
+Based on these results, what is your NEXT ACTION?
+
+Options:
+- Call MORE tools if you need more data (e.g., validate a detection, measure photometry, check catalogs)
+- Call log_finding() if you've confirmed a real discovery
+- Call mark_exhausted() or add_note() to update your knowledge
+- If you're DONE with this region and ready to move on, just write THOUGHT: explaining your conclusion. Do NOT call tools you don't need.
+
+Use THOUGHT: and TOOL: format as always.
+"""
+
+
 def build_user_prompt(cycle_num, previous_results, research_history,
                       initial_target=None, visited_regions=None,
                       current_region_cycles=0, ztf_blacklist=None,
@@ -2402,188 +2434,248 @@ def main():
                 cycle_num += 1
                 continue
         
-        # Execute tools (with anti-loop guards)
+        # ===============================================================
+        # INNER TURN LOOP — Qwen acts, sees results, acts again
+        # ===============================================================
+        MAX_TURNS_PER_CYCLE = 5
         consecutive_failures = 0
         no_progress_count = 0
         previous_results = []
         cycle_summary_parts = []
-        
-        for call in parsed["tool_calls"]:
-            tool_name = call["tool"]
-            params = call["params"]
-            
-            # --- Normalize aliases BEFORE cache check ---
-            aliases = {
-                "radius_arcsec": "radius",
-                "radius_deg": "radius",
-                "target_name": "name",
-                "target": "name",
-                "img_path": "image",
-                "image_path": "image",
-                "size_arcmin": "size",
-            }
-            for alt, canonical in aliases.items():
-                if alt in params and canonical not in params:
-                    params[canonical] = params.pop(alt)
-            
-            # --- Anti-loop: track current region ---
-            ra = params.get("ra")
-            dec = params.get("dec")
-            if ra is not None and dec is not None:
-                region = _region_key(ra, dec)
-                visited_regions[region] = visited_regions.get(region, 0) + 1
+        turn_num = 1
+        current_tool_calls = parsed["tool_calls"]
 
-                if current_region != region:
-                    current_region = region
-                    current_region_cycles = 1
-                else:
-                    current_region_cycles += 1
+        while current_tool_calls and turn_num <= MAX_TURNS_PER_CYCLE:
+            if turn_num > 1:
+                log("INFO", f"── Turn {turn_num}/{MAX_TURNS_PER_CYCLE} (reflection) ──")
 
-                # --- Anti-loop: VISIT CEILING — auto-exhaust overvisited regions ---
-                VISIT_CEILING = 15  # No region needs more than 15 visits
-                region_key_str = f"{round(float(ra), 1)},{round(float(dec), 1)}"
-                mem_region = memory.get("regions", {}).get(region_key_str)
-                if mem_region and mem_region.get("visits", 0) >= VISIT_CEILING and not mem_region.get("exhausted"):
-                    log("WARN", f"VISIT CEILING: RA={ra}, Dec={dec} has {mem_region['visits']} visits — auto-exhausting")
-                    mem_region["exhausted"] = True
-                    if "notes" not in mem_region:
-                        mem_region["notes"] = []
-                    mem_region["notes"].append({
-                        "text": f"[AUTO-EXHAUSTED] Visit ceiling ({VISIT_CEILING}) reached. Region force-closed.",
-                        "cycle": memory.get("total_cycles_all_runs", 0),
-                        "timestamp": datetime.datetime.now().isoformat(),
-                    })
-                    # Dismiss leads near this region
-                    memory["best_leads"] = [
-                        l for l in memory.get("best_leads", [])
-                        if not (abs(l["ra"] - float(ra)) < 1.5 and abs(l["dec"] - float(dec)) < 1.5)
-                    ]
-                    # Block this tool call — redirect to new region
-                    rand_ra = round(random.uniform(0, 360), 2)
-                    rand_dec = round(random.uniform(-30, 80), 2)
-                    result = {
-                        "blocked": True,
-                        "message": f"⚠ VISIT CEILING: This region (RA={ra}, Dec={dec}) has been visited {mem_region['visits']} times and is now EXHAUSTED. "
-                                   f"Explore a NEW region instead. Try: search_region(ra={rand_ra}, dec={rand_dec}, radius=0.05)"
-                    }
-                    previous_results.append({"tool": tool_name, "params": params, "result": result})
-                    cycle_summary_parts.append(f"{tool_name}: BLOCKED (visit ceiling)")
-                    save_memory(memory)
-                    continue
+            turn_results = []  # Results from THIS turn only
 
-            # --- Anti-loop: cooldown-based duplicate prevention ---
-            cache_key = _tool_cache_key(tool_name, params)
-            if tool_name not in EXEMPT_FROM_COOLDOWN and cache_key in tool_call_history:
-                cycles_since = cycle_num - tool_call_history[cache_key]
-                if cycles_since < TOOL_COOLDOWN:
-                    log("WARN", f"COOLDOWN: {tool_name}({params}) — called {cycles_since} cycles ago, wait {TOOL_COOLDOWN - cycles_since} more")
-                    result = {
-                        "cooldown": True,
-                        "message": f"This exact call was made {cycles_since} cycles ago. Try a DIFFERENT tool on these coords, or explore new coordinates. Cooldown resets in {TOOL_COOLDOWN - cycles_since} cycles.",
-                    }
-                    previous_results.append({"tool": tool_name, "params": params, "result": result})
-                    cycle_summary_parts.append(f"{tool_name}: COOLDOWN ({cycles_since}/{TOOL_COOLDOWN})")
-                    continue
-            
-            # --- Anti-loop: ZTF blacklist ---
-            if tool_name == "ztf_lightcurve" and ra is not None and dec is not None:
-                ztf_region = _region_key(ra, dec)
-                if ztf_region in ztf_blacklist:
-                    log("WARN", f"BLOCKED ZTF at {ztf_region} — blacklisted after repeated timeouts")
-                    result = {
-                        "blocked": True,
-                        "message": f"ZTF is BLACKLISTED for this region (RA={ra}, Dec={dec}) due to repeated timeouts. Move to a different region.",
-                    }
-                    previous_results.append({"tool": tool_name, "params": params, "result": result})
-                    cycle_summary_parts.append(f"ZTF: BLOCKED (blacklisted)")
-                    continue
-            
-            # (Image tools are exempt from cooldown — Qwen can re-analyze freely)
-            
-            log("TOOL", f"{tool_name}|Calling {tool_name}({params})")
-            _write_dashboard_status(running=True, cycle=cycle_num, phase="tool", current_tool=tool_name)
-            try:
-                result = execute_tool(tool_name, params, memory=memory)
-            except Exception as tool_err:
-                log("ERROR", f"Tool {tool_name} crashed: {type(tool_err).__name__}: {tool_err}")
-                result = {"error": f"Tool crashed: {tool_err}"}
-            
-            # --- Vision: queue image for next cycle's inline prompt ---
-            if isinstance(result, dict) and result.get("__vision__"):
-                pending_images.append(result["image_b64"])
-                log("OK", f"Image queued for inline vision: {result.get('image_path', '?')}")
-                # Strip base64 from result to avoid bloating the prompt
-                result = {
-                    "status": result["status"],
-                    "image_path": result.get("image_path", ""),
-                    "png_path": result.get("png_path", ""),
-                    "prompt": result.get("prompt", ""),
+            for call in current_tool_calls:
+                tool_name = call["tool"]
+                params = call["params"]
+
+                # --- Normalize aliases BEFORE cache check ---
+                aliases = {
+                    "radius_arcsec": "radius",
+                    "radius_deg": "radius",
+                    "target_name": "name",
+                    "target": "name",
+                    "img_path": "image",
+                    "image_path": "image",
+                    "size_arcmin": "size",
                 }
+                for alt, canonical in aliases.items():
+                    if alt in params and canonical not in params:
+                        params[canonical] = params.pop(alt)
 
-            # --- Log the result for debugging ---
-            result_summary = _summarize_result(tool_name, result)
-            log("RESULT", f"{tool_name}|{result_summary}")
-
-            # --- Track when this call was made ---
-            tool_call_history[cache_key] = cycle_num
-
-            # --- Anti-loop: track ZTF failures ---
-            if tool_name == "ztf_lightcurve" and "error" in result and "timeout" in str(result.get("error", "")).lower():
+                # --- Anti-loop: track current region ---
+                ra = params.get("ra")
+                dec = params.get("dec")
                 if ra is not None and dec is not None:
+                    region = _region_key(ra, dec)
+                    visited_regions[region] = visited_regions.get(region, 0) + 1
+
+                    if current_region != region:
+                        current_region = region
+                        current_region_cycles = 1
+                    else:
+                        current_region_cycles += 1
+
+                    # --- Anti-loop: VISIT CEILING — auto-exhaust overvisited regions ---
+                    VISIT_CEILING = 15
+                    region_key_str = f"{round(float(ra), 1)},{round(float(dec), 1)}"
+                    mem_region = memory.get("regions", {}).get(region_key_str)
+                    if mem_region and mem_region.get("visits", 0) >= VISIT_CEILING and not mem_region.get("exhausted"):
+                        log("WARN", f"VISIT CEILING: RA={ra}, Dec={dec} has {mem_region['visits']} visits — auto-exhausting")
+                        mem_region["exhausted"] = True
+                        if "notes" not in mem_region:
+                            mem_region["notes"] = []
+                        mem_region["notes"].append({
+                            "text": f"[AUTO-EXHAUSTED] Visit ceiling ({VISIT_CEILING}) reached. Region force-closed.",
+                            "cycle": memory.get("total_cycles_all_runs", 0),
+                            "timestamp": datetime.datetime.now().isoformat(),
+                        })
+                        memory["best_leads"] = [
+                            l for l in memory.get("best_leads", [])
+                            if not (abs(l["ra"] - float(ra)) < 1.5 and abs(l["dec"] - float(dec)) < 1.5)
+                        ]
+                        rand_ra = round(random.uniform(0, 360), 2)
+                        rand_dec = round(random.uniform(-30, 80), 2)
+                        result = {
+                            "blocked": True,
+                            "message": f"⚠ VISIT CEILING: This region (RA={ra}, Dec={dec}) has been visited {mem_region['visits']} times and is now EXHAUSTED. "
+                                       f"Explore a NEW region instead. Try: search_region(ra={rand_ra}, dec={rand_dec}, radius=0.05)"
+                        }
+                        turn_results.append({"tool": tool_name, "params": params, "result": result})
+                        cycle_summary_parts.append(f"{tool_name}: BLOCKED (visit ceiling)")
+                        save_memory(memory)
+                        continue
+
+                # --- Anti-loop: cooldown-based duplicate prevention ---
+                cache_key = _tool_cache_key(tool_name, params)
+                if tool_name not in EXEMPT_FROM_COOLDOWN and cache_key in tool_call_history:
+                    cycles_since = cycle_num - tool_call_history[cache_key]
+                    if cycles_since < TOOL_COOLDOWN:
+                        log("WARN", f"COOLDOWN: {tool_name}({params}) — called {cycles_since} cycles ago, wait {TOOL_COOLDOWN - cycles_since} more")
+                        result = {
+                            "cooldown": True,
+                            "message": f"This exact call was made {cycles_since} cycles ago. Try a DIFFERENT tool on these coords, or explore new coordinates. Cooldown resets in {TOOL_COOLDOWN - cycles_since} cycles.",
+                        }
+                        turn_results.append({"tool": tool_name, "params": params, "result": result})
+                        cycle_summary_parts.append(f"{tool_name}: COOLDOWN ({cycles_since}/{TOOL_COOLDOWN})")
+                        continue
+
+                # --- Anti-loop: ZTF blacklist ---
+                if tool_name == "ztf_lightcurve" and ra is not None and dec is not None:
                     ztf_region = _region_key(ra, dec)
-                    ztf_fail_count[ztf_region] = ztf_fail_count.get(ztf_region, 0) + 1
-                    if ztf_fail_count[ztf_region] >= 2:
-                        ztf_blacklist.add(ztf_region)
-                        log("WARN", f"ZTF blacklisted for region {ztf_region} after {ztf_fail_count[ztf_region]} timeouts")
-            
-            previous_results.append({
-                "tool": tool_name,
-                "params": params,
-                "result": result,
-            })
-            
-            # Build summary
-            if "error" in result:
-                cycle_summary_parts.append(f"{tool_name}: ERROR - {result['error']}")
-            elif tool_name == "search_region" or tool_name == "search_target":
-                n = result.get("total_results", 0)
-                cycle_summary_parts.append(f"{tool_name}: {n} observations found")
-            elif tool_name == "multi_epoch":
-                n = result.get("n_groups", 0)
-                cycle_summary_parts.append(f"{tool_name}: {n} multi-epoch groups")
-            elif tool_name == "ztf_lightcurve":
-                n = result.get("total_points", 0)
-                var = result.get("variability_flag", False)
-                cycle_summary_parts.append(f"ZTF: {n} points, variable={var}")
-            elif tool_name == "simbad_check":
-                n = result.get("n_known_objects", 0)
-                cycle_summary_parts.append(f"SIMBAD: {n} known objects nearby")
-            elif tool_name == "download_multiepoch":
-                n = result.get("n_images", 0)
-                baseline = result.get("time_baseline_days", "?")
-                cycle_summary_parts.append(f"download_multiepoch: {n} epochs ({baseline}d baseline)")
-            elif tool_name == "download_legacy":
-                n = result.get("n_images", 0)
-                cycle_summary_parts.append(f"download_legacy: {n} bands from Legacy Survey")
-            elif tool_name == "query_gaia":
-                n = result.get("n_sources", 0)
-                cycle_summary_parts.append(f"query_gaia: {n} Gaia sources")
-            elif tool_name == "check_transients":
-                n = result.get("n_matches", 0)
-                cycle_summary_parts.append(f"check_transients: {n} known transients")
-            elif tool_name == "measure_photometry":
-                mag = result.get("magnitude")
-                snr = result.get("snr")
-                if mag is not None:
-                    cycle_summary_parts.append(f"measure_photometry: mag={mag}, SNR={snr}")
+                    if ztf_region in ztf_blacklist:
+                        log("WARN", f"BLOCKED ZTF at {ztf_region} — blacklisted after repeated timeouts")
+                        result = {
+                            "blocked": True,
+                            "message": f"ZTF is BLACKLISTED for this region (RA={ra}, Dec={dec}) due to repeated timeouts. Move to a different region.",
+                        }
+                        turn_results.append({"tool": tool_name, "params": params, "result": result})
+                        cycle_summary_parts.append(f"ZTF: BLOCKED (blacklisted)")
+                        continue
+
+                # (Image tools are exempt from cooldown — Qwen can re-analyze freely)
+
+                log("TOOL", f"{tool_name}|Calling {tool_name}({params})")
+                _write_dashboard_status(running=True, cycle=cycle_num, phase="tool", current_tool=tool_name)
+                try:
+                    result = execute_tool(tool_name, params, memory=memory)
+                except Exception as tool_err:
+                    log("ERROR", f"Tool {tool_name} crashed: {type(tool_err).__name__}: {tool_err}")
+                    result = {"error": f"Tool crashed: {tool_err}"}
+
+                # --- Vision: queue image for next turn's inline prompt ---
+                if isinstance(result, dict) and result.get("__vision__"):
+                    pending_images.append(result["image_b64"])
+                    log("OK", f"Image queued for inline vision: {result.get('image_path', '?')}")
+                    result = {
+                        "status": result["status"],
+                        "image_path": result.get("image_path", ""),
+                        "png_path": result.get("png_path", ""),
+                        "prompt": result.get("prompt", ""),
+                    }
+
+                # --- Log the result for debugging ---
+                result_summary = _summarize_result(tool_name, result)
+                log("RESULT", f"{tool_name}|{result_summary}")
+
+                # --- Track when this call was made ---
+                tool_call_history[cache_key] = cycle_num
+
+                # --- Anti-loop: track ZTF failures ---
+                if tool_name == "ztf_lightcurve" and "error" in result and "timeout" in str(result.get("error", "")).lower():
+                    if ra is not None and dec is not None:
+                        ztf_region = _region_key(ra, dec)
+                        ztf_fail_count[ztf_region] = ztf_fail_count.get(ztf_region, 0) + 1
+                        if ztf_fail_count[ztf_region] >= 2:
+                            ztf_blacklist.add(ztf_region)
+                            log("WARN", f"ZTF blacklisted for region {ztf_region} after {ztf_fail_count[ztf_region]} timeouts")
+
+                turn_results.append({
+                    "tool": tool_name,
+                    "params": params,
+                    "result": result,
+                })
+
+                # Build summary
+                if "error" in result:
+                    cycle_summary_parts.append(f"{tool_name}: ERROR - {result['error']}")
+                elif tool_name == "search_region" or tool_name == "search_target":
+                    n = result.get("total_results", 0)
+                    cycle_summary_parts.append(f"{tool_name}: {n} observations found")
+                elif tool_name == "multi_epoch":
+                    n = result.get("n_groups", 0)
+                    cycle_summary_parts.append(f"{tool_name}: {n} multi-epoch groups")
+                elif tool_name == "ztf_lightcurve":
+                    n = result.get("total_points", 0)
+                    var = result.get("variability_flag", False)
+                    cycle_summary_parts.append(f"ZTF: {n} points, variable={var}")
+                elif tool_name == "simbad_check":
+                    n = result.get("n_known_objects", 0)
+                    cycle_summary_parts.append(f"SIMBAD: {n} known objects nearby")
+                elif tool_name == "download_multiepoch":
+                    n = result.get("n_images", 0)
+                    baseline = result.get("time_baseline_days", "?")
+                    cycle_summary_parts.append(f"download_multiepoch: {n} epochs ({baseline}d baseline)")
+                elif tool_name == "download_legacy":
+                    n = result.get("n_images", 0)
+                    cycle_summary_parts.append(f"download_legacy: {n} bands from Legacy Survey")
+                elif tool_name == "query_gaia":
+                    n = result.get("n_sources", 0)
+                    cycle_summary_parts.append(f"query_gaia: {n} Gaia sources")
+                elif tool_name == "check_transients":
+                    n = result.get("n_matches", 0)
+                    cycle_summary_parts.append(f"check_transients: {n} known transients")
+                elif tool_name == "measure_photometry":
+                    mag = result.get("magnitude")
+                    snr = result.get("snr")
+                    if mag is not None:
+                        cycle_summary_parts.append(f"measure_photometry: mag={mag}, SNR={snr}")
+                    else:
+                        cycle_summary_parts.append(f"measure_photometry: source not detected")
+                elif tool_name == "log_finding":
+                    fid = result.get("finding_id", "?")
+                    cycle_summary_parts.append(f"Finding logged: {fid}")
                 else:
-                    cycle_summary_parts.append(f"measure_photometry: source not detected")
-            elif tool_name == "log_finding":
-                fid = result.get("finding_id", "?")
-                cycle_summary_parts.append(f"Finding logged: {fid}")
-            else:
-                cycle_summary_parts.append(f"{tool_name}: done")
-        
+                    cycle_summary_parts.append(f"{tool_name}: done")
+
+            # Accumulate turn results into cycle-wide previous_results
+            previous_results.extend(turn_results)
+
+            # --- REFLECTION: send results back to Qwen for next action ---
+            if turn_num >= MAX_TURNS_PER_CYCLE:
+                log("INFO", f"Max turns ({MAX_TURNS_PER_CYCLE}) reached — ending cycle")
+                break
+
+            # Build reflection prompt and ask Qwen what to do next
+            log("INFO", f"Reflecting on {len(turn_results)} tool result(s)...")
+            _write_dashboard_status(running=True, cycle=cycle_num, phase="reflecting", current_tool=None)
+
+            reflection_prompt = build_reflection_prompt(cycle_num, turn_num, turn_results)
+            images_for_reflect = pending_images if pending_images else None
+            pending_images = []
+
+            reflect_response, reflect_elapsed = call_ollama(
+                args.model, system_prompt, reflection_prompt,
+                args.temperature, images=images_for_reflect,
+            )
+
+            if reflect_response is None:
+                log("WARN", "No reflection response from Qwen — ending cycle")
+                break
+
+            # Deduplicate
+            try:
+                reflect_response, _ = deduplicate_response(reflect_response)
+            except Exception:
+                pass
+
+            reflect_parsed = parse_tool_calls(reflect_response)
+
+            # Log reflection thoughts
+            if reflect_parsed["thoughts"]:
+                for thought in reflect_parsed["thoughts"]:
+                    log("THINK", thought)
+                    _write_dashboard_status(running=True, cycle=cycle_num, phase="thought", last_thought=thought)
+
+            # If Qwen has no more tool calls, the cycle is done
+            if not reflect_parsed["tool_calls"]:
+                log("INFO", f"Qwen done reflecting (no more tools) — cycle complete after {turn_num} turn(s)")
+                break
+
+            # Otherwise, loop for another turn
+            current_tool_calls = reflect_parsed["tool_calls"]
+            turn_num += 1
+
+        # Log total turns if we did multi-turn
+        if turn_num > 1:
+            log("OK", f"Cycle {cycle_num} completed in {turn_num} turn(s)")
+
         # --- Anti-loop: advance seed index when region changes ---
         if current_region_cycles >= 3 and seed_index < len(SEED_TARGETS):
             seed_index += 1
