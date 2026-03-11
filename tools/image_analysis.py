@@ -57,6 +57,9 @@ def read_fits_data(filepath):
             if hdu.data is not None and hdu.data.ndim >= 2:
                 header = dict(hdu.header)
                 data = hdu.data.astype(np.float64)
+                # Track NaN fraction before replacing (for compare_images guard)
+                nan_count = np.count_nonzero(np.isnan(data))
+                header["_NAN_FRACTION"] = nan_count / data.size if data.size > 0 else 0.0
                 # Handle NaN values
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
                 return data, header
@@ -65,6 +68,8 @@ def read_fits_data(filepath):
         if hdul[0].data is not None:
             header = dict(hdul[0].header)
             data = hdul[0].data.astype(np.float64)
+            nan_count = np.count_nonzero(np.isnan(data))
+            header["_NAN_FRACTION"] = nan_count / data.size if data.size > 0 else 0.0
             data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
             return data, header
 
@@ -585,9 +590,83 @@ def main():
     elif args.command == "compare":
         data1, h1 = read_image_data(args.img1)
         data2, h2 = read_image_data(args.img2)
+
+        # --- NaN guard: reject images that are mostly empty ---
+        nan_frac1 = h1.get("_NAN_FRACTION", 0.0)
+        nan_frac2 = h2.get("_NAN_FRACTION", 0.0)
+        NAN_THRESHOLD = 0.5  # reject if >50% NaN
+
+        if nan_frac1 > NAN_THRESHOLD or nan_frac2 > NAN_THRESHOLD:
+            bad = []
+            if nan_frac1 > NAN_THRESHOLD:
+                bad.append(f"img1 ({os.path.basename(args.img1)}) is {nan_frac1:.0%} NaN")
+            if nan_frac2 > NAN_THRESHOLD:
+                bad.append(f"img2 ({os.path.basename(args.img2)}) is {nan_frac2:.0%} NaN")
+            result = {
+                "error": "BLANK_IMAGE",
+                "epoch1": args.img1,
+                "epoch2": args.img2,
+                "nan_fraction_img1": round(nan_frac1, 3),
+                "nan_fraction_img2": round(nan_frac2, 3),
+                "WARNING": (
+                    f"COMPARISON REJECTED: {'; '.join(bad)}. "
+                    f"An image with >50% NaN pixels has no valid astronomical data — "
+                    f"it was likely outside the survey footprint for that epoch. "
+                    f"Any 'transients' would be artifacts (zeros vs real pixels). "
+                    f"Try download_multiepoch with fewer epochs, or try a different filter."
+                ),
+                "brightening_events": [],
+                "fading_events": [],
+            }
+            print(json.dumps(result, indent=2))
+            sys.exit(0)
+
+        # --- NaN edge masking: zero out pixels that were NaN in EITHER image ---
+        # Warp images have NaN at edges where coverage differs between epochs.
+        # Without masking, these become 0 vs real_value → false "transients".
+        if nan_frac1 > 0 or nan_frac2 > 0:
+            # Re-open files to get raw NaN masks (data already has NaN→0)
+            def _get_nan_mask(filepath):
+                filepath = fuzzy_find_image(filepath)
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext not in ('.fits',):
+                    return None
+                try:
+                    with fits.open(filepath) as hdul:
+                        for hdu in hdul:
+                            if hdu.data is not None and hdu.data.ndim >= 2:
+                                return np.isnan(hdu.data)
+                        if hdul[0].data is not None:
+                            return np.isnan(hdul[0].data)
+                except Exception:
+                    pass
+                return None
+
+            mask1 = _get_nan_mask(args.img1)
+            mask2 = _get_nan_mask(args.img2)
+            if mask1 is not None and mask2 is not None:
+                # combined_bad = True where EITHER image had NaN
+                combined_bad = mask1 | mask2
+                n_masked = int(np.count_nonzero(combined_bad))
+                if n_masked > 0:
+                    data1[combined_bad] = 0.0
+                    data2[combined_bad] = 0.0
+                    nan_frac_combined = n_masked / combined_bad.size
+                    h1["_MASKED_PIXELS"] = n_masked
+                    h1["_MASKED_FRACTION"] = round(nan_frac_combined, 3)
+
         result = compare_images(data1, data2, h1, h2)
         result["epoch1"] = args.img1
         result["epoch2"] = args.img2
+
+        # Add NaN masking info if applicable
+        if "_MASKED_FRACTION" in h1:
+            result["nan_masked_fraction"] = h1["_MASKED_FRACTION"]
+            result["nan_note"] = (
+                f"{h1['_MASKED_PIXELS']} edge pixels masked "
+                f"({h1['_MASKED_FRACTION']:.0%} of image) — "
+                f"these were NaN in one or both epochs and excluded from analysis."
+            )
 
         # --- Band & epoch extraction helpers ---
         import re as _re
