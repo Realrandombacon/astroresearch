@@ -561,6 +561,10 @@ def radec_to_pixel(ra, dec, header):
     Returns:
         (x_pix, y_pix) as floats
     """
+    # Get image dimensions from header (needed for cutout offset detection)
+    naxis1 = header.get("NAXIS1", 0) if hasattr(header, 'get') else getattr(header, 'get', lambda k, d=0: d)(k, 0)
+    naxis2 = header.get("NAXIS2", 0) if hasattr(header, 'get') else 0
+
     try:
         from astropy.coordinates import SkyCoord
         import astropy.units as u
@@ -579,7 +583,26 @@ def radec_to_pixel(ra, dec, header):
             w = WCS(header)
         coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
         px, py = w.world_to_pixel(coord)
-        return float(px), float(py)
+        px, py = float(px), float(py)
+
+        # Pan-STARRS warp cutouts keep the original skycell WCS — CRPIX can
+        # be thousands of pixels outside the small cutout.  Detect this case
+        # (result wildly outside image) and fall back to a simple approach:
+        # compute where the *image center* maps in skycell coords, then offset.
+        if naxis1 > 0 and naxis2 > 0:
+            if px < -naxis1 or px > 2 * naxis1 or py < -naxis2 or py > 2 * naxis2:
+                # The cutout is a small crop from a huge skycell.  Map the
+                # image center to sky, then compute delta-pixels from there.
+                from astropy.coordinates import SkyCoord as _SC
+                center_sky = w.pixel_to_world(naxis1 / 2.0, naxis2 / 2.0)
+                # Re-project target relative to image center
+                dra_deg = (ra - center_sky.ra.deg) * np.cos(np.radians(dec))
+                ddec_deg = dec - center_sky.dec.deg
+                cdelt = abs(header.get("CDELT1", header.get("CD1_1", 6.944e-5)))
+                px = naxis1 / 2.0 + dra_deg / cdelt
+                py = naxis2 / 2.0 + ddec_deg / abs(header.get("CDELT2", header.get("CD2_2", cdelt)))
+
+        return px, py
     except Exception:
         # Fallback to manual linear WCS inversion
         crpix1 = header.get("CRPIX1", 0)
