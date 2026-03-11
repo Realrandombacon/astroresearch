@@ -1,5 +1,7 @@
 # AstroResearch
 
+> ⚠️ **Work in progress** — this project is under active development. Features, tools, and the agent's workflow may change significantly.
+
 Autonomous astronomical anomaly detection powered by a local LLM agent.
 
 Inspired by Andrej Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — which demonstrated that LLM agents can autonomously conduct research — AstroResearch applies the same philosophy to observational astronomy. Instead of papers and code, this agent explores the real sky.
