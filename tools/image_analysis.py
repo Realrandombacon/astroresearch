@@ -477,6 +477,20 @@ def compare_images(data1, data2, header1=None, header2=None):
             if sign < 0 and val > np.min(neighborhood):
                 continue
 
+            # --- Cosmic ray rejection ---
+            # Real astronomical sources spread across PSF (~3-4 px FWHM).
+            # Cosmic rays hit single pixels with sharp edges.
+            hw = 2  # half-width of check region
+            y_lo = max(0, y - hw)
+            y_hi = min(nrows, y + hw + 1)
+            x_lo = max(0, x - hw)
+            x_hi = min(ncols, x + hw + 1)
+            patch = np.abs(significance[y_lo:y_hi, x_lo:x_hi])
+            n_above_3sig = int(np.sum(patch > 3.0))
+            if n_above_3sig < 3:
+                # Only 1-2 pixels above 3 sigma in a 5x5 box → cosmic ray
+                continue
+
             anomaly_list.append({
                 "x": int(x),
                 "y": int(y),

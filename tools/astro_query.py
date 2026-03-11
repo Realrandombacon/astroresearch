@@ -412,7 +412,7 @@ def detect_file_format(data_bytes):
 
 
 
-def download_cutout(ra, dec, size_arcmin=1.0, survey="panstarrs"):
+def download_cutout(ra, dec, size_arcmin=2.0, survey="panstarrs"):
     """Download image cutouts from Pan-STARRS survey.
 
     Detects actual file format (FITS vs JPEG) and saves with correct extension.
@@ -583,7 +583,7 @@ def mjd_to_iso(mjd):
     return dt.strftime("%Y-%m-%d")
 
 
-def download_multiepoch(ra, dec, filter_name='g', n_epochs=3, size_arcmin=1.0):
+def download_multiepoch(ra, dec, filter_name='g', n_epochs=3, size_arcmin=2.0):
     """Download multiple epoch images from Pan-STARRS warps for temporal comparison.
 
     Queries ps1filenames.py for individual warp (single-exposure) images,
@@ -1176,7 +1176,7 @@ def main():
     p_cut = sub.add_parser("download-cutout", help="Download image cutout")
     p_cut.add_argument("--ra", type=float, required=True)
     p_cut.add_argument("--dec", type=float, required=True)
-    p_cut.add_argument("--size", type=float, default=1.0, help="Size in arcmin")
+    p_cut.add_argument("--size", type=float, default=2.0, help="Size in arcmin")
 
     # download-multiepoch
     p_mepoch = sub.add_parser("download-multiepoch", help="Download multi-epoch warp images from Pan-STARRS")
@@ -1184,7 +1184,7 @@ def main():
     p_mepoch.add_argument("--dec", type=float, required=True)
     p_mepoch.add_argument("--filter", type=str, default="g", help="Filter band (g/r/i/z/y)")
     p_mepoch.add_argument("--epochs", type=int, default=3, help="Number of epochs (2-6)")
-    p_mepoch.add_argument("--size", type=float, default=1.0, help="Size in arcmin")
+    p_mepoch.add_argument("--size", type=float, default=2.0, help="Size in arcmin")
 
     # download-legacy
     p_legacy = sub.add_parser("download-legacy", help="Download Legacy Survey DR10 cutout")

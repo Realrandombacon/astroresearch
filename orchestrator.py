@@ -415,11 +415,11 @@ AVAILABLE_TOOLS = {
         "usage": "multi_epoch(ra=<degrees>, dec=<degrees>, radius=<degrees>)",
         "script": "tools/astro_query.py multi-epoch --ra {ra} --dec {dec} --radius {radius}",
     },
-    "ztf_lightcurve": {
-        "description": "Get ZTF light curve data. SLOW (may take 2-3 min). Use radius=5 arcsec. If it times out, skip ZTF for this target.",
-        "usage": "ztf_lightcurve(ra=<degrees>, dec=<degrees>, radius=5)",
-        "script": "tools/astro_query.py ztf-lightcurve --ra {ra} --dec {dec} --radius {radius}",
-    },
+    # "ztf_lightcurve": {  # DISABLED — endpoint consistently times out, wastes Qwen cycles
+    #     "description": "Get ZTF light curve data. SLOW (may take 2-3 min). Use radius=5 arcsec. If it times out, skip ZTF for this target.",
+    #     "usage": "ztf_lightcurve(ra=<degrees>, dec=<degrees>, radius=5)",
+    #     "script": "tools/astro_query.py ztf-lightcurve --ra {ra} --dec {dec} --radius {radius}",
+    # },
     "simbad_check": {
         "description": "Check SIMBAD catalog for known objects at a position",
         "usage": "simbad_check(ra=<degrees>, dec=<degrees>, radius=<arcsec>)",
@@ -2049,8 +2049,7 @@ Your approach — think like an astronomer:
 5. Analyze quantitatively: detect_sources gives exact source positions, fluxes, and SNR
 6. Compare SAME-BAND different-epoch images: compare_images on warp_..._ep1 vs warp_..._ep3 finds what CHANGED over time — this is how you find transients!
 7. Cross-check with independent survey: download_legacy for Legacy Survey images (~5yr baseline from Pan-STARRS)
-8. Check variability: ztf_lightcurve for light curves (northern sky only, Dec > -30)
-9. Log discoveries: log_finding ONLY when you found something noteworthy
+8. Log discoveries: log_finding ONLY when you found something noteworthy
 
 How to investigate a region thoroughly (call multiple tools per cycle!):
 
@@ -2071,16 +2070,18 @@ How to investigate a region thoroughly (call multiple tools per cycle!):
     TOOL: download_legacy(ra=..., dec=..., bands='grz')
     TOOL: compare_images(img1='data/images/cutout_..._g.fits', img2='data/images/legacy_..._g.fits')
 
-  Cycle 5 — VALIDATE before logging (NEW! Use these to eliminate false positives):
+  Cycle 5 — VALIDATE before logging (CRITICAL! Eliminate false positives):
+    TOOL: simbad_check(ra=..., dec=..., radius=30)
     TOOL: query_gaia(ra=..., dec=..., radius=5)
     TOOL: check_transients(ra=..., dec=..., radius=5)
     TOOL: measure_photometry(image='data/images/warp_..._g_ep1_mjd....fits', ra=..., dec=...)
     TOOL: measure_photometry(image='data/images/warp_..._g_ep3_mjd....fits', ra=..., dec=...)
 
   Cycle 6 — Conclusion (only if validation passed!):
-    TOOL: log_finding(ra=..., dec=..., description='Brightening transient: source increased 2.3 mag between MJD 57234 and MJD 59012 in g-band. NOT in Gaia variable catalog. No ALeRCE match — potentially novel! Aperture photometry: mag=19.2→16.9.', significance='high')
+    TOOL: log_finding(ra=..., dec=..., description='Brightening transient: source increased <MEASURED_MAG_CHANGE> mag between MJD <EARLIER_EPOCH> and MJD <LATER_EPOCH> in <BAND>-band. NOT in SIMBAD/Gaia. No ALeRCE match — potentially novel! Photometry: mag=<EPOCH1_MAG>→<EPOCH2_MAG>.', significance='high')
 
 VALIDATION WORKFLOW — BEFORE logging ANY finding with significance='high':
+  0. simbad_check(ra, dec, radius=30) → If a known object is found, it's NOT novel. Downgrade to 'medium' or skip.
   1. query_gaia(ra, dec) → If variable_class is set, it's a KNOWN variable star (not novel)
      High proper motion (pm_total > 50 mas/yr) means it's a nearby moving star, not a transient
   2. check_transients(ra, dec) → If ALeRCE returns matches, the transient is ALREADY KNOWN
@@ -2107,7 +2108,7 @@ detect_sources is your most powerful tool — it gives you hard numbers:
 
 File naming guide:
   - cutout_RA_DEC_g.fits     = Pan-STARRS STACKED image (single epoch per band)
-  - warp_RA_DEC_g_ep1_mjd57234.5.fits = Pan-STARRS WARP (individual epoch, DATE in filename!)
+  - warp_RA_DEC_g_ep1_mjdXXXXX.X.fits = Pan-STARRS WARP (individual epoch, DATE in filename!)
   - legacy_RA_DEC_g.fits     = Legacy Survey DR10 image (independent survey, different epoch)
   For transient detection, compare files with SAME band letter but DIFFERENT epochs or surveys.
 
@@ -2115,9 +2116,11 @@ When to use log_finding:
   - compare_images on same-band different-epoch images found brightening/fading → significance='high'
   - Source detected in one epoch but missing in another → significance='high'
   - Sources NOT in SIMBAD → log with significance='medium'
-  - ZTF shows variability (mag_range > 0.3) → significance='medium'
   - Nothing interesting found → do NOT log. Just move to the next region.
   - Include NUMBERS in your description: source count, SNR, flux, magnitude, coordinates, MJD dates
+  - NEVER copy numbers from examples — use YOUR OWN measurements from detect_sources, compare_images, measure_photometry
+  - If you haven't measured the exact magnitude change, say "flux ratio X:Y" instead of making up a mag value
+  - Every number in your description MUST come from a tool result you received this session
 
 Always respond with:
 THOUGHT: Your scientific reasoning — what you expect to find and why
@@ -2158,7 +2161,6 @@ Validation tools — use these to verify candidates BEFORE logging findings:
 Coordinates:
 - RA in degrees (0-360), Dec in degrees (-90 to +90)
 - MAST radius in degrees (0.01-1.0), SIMBAD radius in arcsec (1-300)
-- ZTF radius in arcsec (use 5, max 10 — larger will timeout!)
 - Gaia/ALeRCE radius in arcsec (default 5)
 - Northern sky (Dec > -30) has best ZTF coverage
 
@@ -2167,10 +2169,10 @@ Format (MUST use parentheses):
   TOOL: download_multiepoch(ra=150.0, dec=30.0, filter='g', epochs=3)
   TOOL: download_legacy(ra=150.0, dec=30.0, bands='grz')
   TOOL: detect_sources(image='data/images/cutout_150.0000_30.0000_g.fits', sigma=3.0)
-  TOOL: compare_images(img1='data/images/warp_150.0000_30.0000_g_ep1_mjd57234.5.fits', img2='data/images/warp_150.0000_30.0000_g_ep3_mjd59012.3.fits')
+  TOOL: compare_images(img1='data/images/warp_150.0000_30.0000_g_ep1_mjdXXXXX.X.fits', img2='data/images/warp_150.0000_30.0000_g_ep3_mjdXXXXX.X.fits')
   TOOL: query_gaia(ra=150.0, dec=30.0, radius=5)
   TOOL: check_transients(ra=150.0, dec=30.0, radius=5)
-  TOOL: measure_photometry(image='data/images/warp_150.0000_30.0000_g_ep1_mjd57234.5.fits', ra=150.0, dec=30.0)
+  TOOL: measure_photometry(image='data/images/warp_150.0000_30.0000_g_ep1_mjdXXXXX.X.fits', ra=150.0, dec=30.0)
 """
 
 
