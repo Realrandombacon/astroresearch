@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Data (regenerated at runtime)
+data/images/
+data/simbad/
+data/mast/
+data/png/
+data/catalogs/
+data/multi_epoch/
+data/ztf/
+
+# Agent state (session-specific, regenerated at runtime)
+memory.json
+dashboard_status.json
+findings/
+findings.tsv
+reports/
+
+# Logs (large, session-specific)
+research.log
+random log.txt
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
