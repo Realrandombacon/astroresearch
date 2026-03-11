@@ -1326,10 +1326,8 @@ def _my_stats(memory, **kwargs):
         recommendations.append("Low finding rate — try denser fields (galaxy clusters, galactic plane)")
     if findings_by_sig.get("high", 0) < 5:
         recommendations.append("Few high-significance finds — look for sources absent in one band, or with ZTF variability")
-    if visit_buckets.get("16+ visits", 0) > 3:
-        recommendations.append("Several over-visited regions — use mark_exhausted more aggressively")
-    if n_exhausted < n_regions * 0.3 and total_cycles > 100:
-        recommendations.append("Many regions still active — consider closing investigated ones with mark_exhausted")
+    if visit_buckets.get("16+ visits", 0) > 10:
+        recommendations.append("Many heavily-visited regions — make sure you're completing investigations and marking them exhausted when truly done")
     shallow = visit_buckets.get("1 visit", 0)
     if shallow > n_regions * 0.4:
         recommendations.append(f"{shallow} regions visited only once — revisit promising ones for deeper analysis")
@@ -2139,9 +2137,15 @@ Memory WRITE tools — YOU manage your own knowledge base:
 - add_note(ra=143.0, dec=60.0, note='All 15 sources matched SIMBAD. No transients. Only normal field stars.') — write a note to your future self about a region
 - mark_exhausted(ra=143.0, dec=60.0, reason='Downloaded g/r/i bands, detected sources, checked SIMBAD, no anomalies') — flag a region as fully investigated
 
-CRITICAL: After you finish investigating a region (downloaded cutouts, detected sources, checked SIMBAD, logged findings or found nothing), you MUST use dismiss_lead or mark_exhausted before moving on. This prevents you from getting stuck in a loop re-analyzing the same regions forever!
+TAKE YOUR TIME investigating each region thoroughly! A proper investigation needs multiple cycles:
+  - Download multi-band cutouts + multi-epoch warps (2-3 cycles)
+  - Detect sources, compare images, look for transients (2-3 cycles)
+  - Validate candidates with SIMBAD, Gaia, ALeRCE, photometry (1-2 cycles)
+  - Log findings or conclude (1 cycle)
+Do NOT rush to mark_exhausted — only use it when you've genuinely completed ALL steps above.
+Use add_note to record partial progress so you remember where you left off.
 
-Recommended workflow for closing a region:
+When you're truly DONE with a region (nothing left to check):
   TOOL: add_note(ra=..., dec=..., note='Summary: 12 sources detected, all match SIMBAD. No transients.')
   TOOL: mark_exhausted(ra=..., dec=..., reason='All bands analyzed, sources cataloged, nothing anomalous')
 
@@ -2199,10 +2203,11 @@ Here are the results from the tools you just called:
 Based on these results, what is your NEXT ACTION?
 
 Options:
-- Call MORE tools if you need more data (e.g., validate a detection, measure photometry, check catalogs)
+- Call MORE tools to dig deeper (e.g., download more bands, validate a detection, measure photometry, check catalogs)
 - Call log_finding() if you've confirmed a real discovery
-- Call mark_exhausted() or add_note() to update your knowledge
-- If you're DONE with this region and ready to move on, just write THOUGHT: explaining your conclusion. Do NOT call tools you don't need.
+- Call add_note() to record partial progress or observations
+- If you've completed ALL investigation steps (multi-band + multi-epoch + validation), use mark_exhausted() to close the region
+- If you're DONE with this region and ready to move on, just write THOUGHT: explaining your conclusion.
 
 Use THOUGHT: and TOOL: format as always.
 """
@@ -2485,7 +2490,10 @@ def main():
                         current_region_cycles += 1
 
                     # --- Anti-loop: VISIT CEILING — auto-exhaust overvisited regions ---
-                    VISIT_CEILING = 15
+                    # NOTE: A thorough investigation (download + detect + compare + validate
+                    # + photometry) easily uses 15-30 tool calls on one region. Set ceiling
+                    # high enough to let Qwen work deeply.
+                    VISIT_CEILING = 50
                     region_key_str = f"{round(float(ra), 1)},{round(float(dec), 1)}"
                     mem_region = memory.get("regions", {}).get(region_key_str)
                     if mem_region and mem_region.get("visits", 0) >= VISIT_CEILING and not mem_region.get("exhausted"):
@@ -2685,16 +2693,19 @@ def main():
         # --- Track recent regions for alternating loop detection ---
         if current_region is not None:
             recent_regions.append(current_region)
-            if len(recent_regions) > 15:
-                recent_regions = recent_regions[-15:]
+            if len(recent_regions) > 25:
+                recent_regions = recent_regions[-25:]
 
         # --- Stuck region breaker: auto-detect semantic loops ---
         # Detects TWO patterns:
-        # 1) Consecutive: same region for 6+ cycles in a row
-        # 2) Alternating: 3 or fewer unique regions in the last 12 cycles
-        STUCK_THRESHOLD = 6
-        ALTERNATING_WINDOW = 12
-        ALTERNATING_MAX_UNIQUE = 3
+        # 1) Consecutive: same region for 12+ cycles in a row (thorough work needs ~8-10)
+        # 2) Alternating: only 2 unique regions in the last 20 cycles
+        # NOTE: Qwen's proper workflow (download→detect→compare→validate→photometry)
+        # legitimately stays on one region for many cycles. Only intervene for
+        # genuine stuck loops, not deep investigation.
+        STUCK_THRESHOLD = 12
+        ALTERNATING_WINDOW = 20
+        ALTERNATING_MAX_UNIQUE = 2
         used_write_tools = any(
             r.get("tool") in ("dismiss_lead", "add_note", "mark_exhausted")
             for r in previous_results
