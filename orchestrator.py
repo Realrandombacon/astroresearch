@@ -2698,12 +2698,13 @@ def main():
 
         # --- Stuck region breaker: auto-detect semantic loops ---
         # Detects TWO patterns:
-        # 1) Consecutive: same region for 12+ cycles in a row (thorough work needs ~8-10)
+        # 1) Consecutive: same region for 25+ cycles in a row
         # 2) Alternating: only 2 unique regions in the last 20 cycles
         # NOTE: Qwen's proper workflow (download→detect→compare→validate→photometry)
-        # legitimately stays on one region for many cycles. Only intervene for
+        # legitimately stays on one region for many cycles. A thorough investigation
+        # can take 15-20 cycles (75-100 tool calls). Only intervene for
         # genuine stuck loops, not deep investigation.
-        STUCK_THRESHOLD = 12
+        STUCK_THRESHOLD = 25
         ALTERNATING_WINDOW = 20
         ALTERNATING_MAX_UNIQUE = 2
         used_write_tools = any(

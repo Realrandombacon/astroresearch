@@ -207,6 +207,76 @@ def api_log():
     return jsonify(lines)
 
 
+@app.route("/api/exploration-pace")
+def api_exploration_pace():
+    """Return cumulative regions & findings over cycles for pace chart."""
+    mem = read_memory()
+    regions = mem.get("regions", {})
+
+    # Build (cycle, event_type) pairs
+    events = []
+    for key, reg in regions.items():
+        first_cycle = reg.get("first_cycle", reg.get("last_cycle", 0))
+        events.append((first_cycle, "region"))
+        for fid in reg.get("findings", []):
+            events.append((reg.get("last_cycle", first_cycle), "finding"))
+
+    events.sort(key=lambda x: x[0])
+
+    cycles, cum_regions, cum_findings = [], [], []
+    r_count, f_count = 0, 0
+    for cycle, etype in events:
+        if etype == "region":
+            r_count += 1
+        else:
+            f_count += 1
+        cycles.append(cycle)
+        cum_regions.append(r_count)
+        cum_findings.append(f_count)
+
+    return jsonify({
+        "cycles": cycles,
+        "cum_regions": cum_regions,
+        "cum_findings": cum_findings,
+    })
+
+
+@app.route("/api/region-depth")
+def api_region_depth():
+    """Return histogram of visits per region."""
+    mem = read_memory()
+    regions = mem.get("regions", {})
+
+    # Bin visits: 1, 2-5, 6-10, 11-20, 21-50, 50+
+    bins = {"1": 0, "2-5": 0, "6-10": 0, "11-20": 0, "21-50": 0, "50+": 0}
+    for reg in regions.values():
+        v = reg.get("visits", 1)
+        if v <= 1:
+            bins["1"] += 1
+        elif v <= 5:
+            bins["2-5"] += 1
+        elif v <= 10:
+            bins["6-10"] += 1
+        elif v <= 20:
+            bins["11-20"] += 1
+        elif v <= 50:
+            bins["21-50"] += 1
+        else:
+            bins["50+"] += 1
+
+    # Also compute stats
+    visit_list = [reg.get("visits", 1) for reg in regions.values()]
+    avg_visits = round(sum(visit_list) / len(visit_list), 1) if visit_list else 0
+    max_visits = max(visit_list) if visit_list else 0
+
+    return jsonify({
+        "bins": bins,
+        "avg_visits": avg_visits,
+        "max_visits": max_visits,
+        "total_regions": len(regions),
+    })
+
+
 @app.route("/api/coverage-grid")
 def api_coverage_grid():
     """Return a 36x18 grid (RA bins x Dec bins) for a heatmap."""
@@ -677,9 +747,9 @@ body::before {
             <div class="stat-detail">High significance</div>
         </div>
         <div class="stat-card amber">
-            <div class="stat-label">RA Spread</div>
+            <div class="stat-label">Sky Sampled</div>
             <div class="stat-value" id="stat-sky-pct">-</div>
-            <div class="stat-detail" id="stat-dec-range">RA spread · Dec: -</div>
+            <div class="stat-detail" id="stat-dec-range">of 41,253 sq°</div>
         </div>
         <div class="stat-card gold">
             <div class="stat-label">Best Leads</div>
@@ -739,6 +809,42 @@ body::before {
             </div>
         </div>
 
+        <!-- EXPLORATION PACE (full width) -->
+        <div class="card full-width">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#x1F680;</span> Exploration Pace
+                </div>
+                <span class="card-badge" style="background:rgba(0,212,255,0.15);color:var(--accent);border:1px solid rgba(0,212,255,0.3);" id="pace-badge">-</span>
+            </div>
+            <div class="card-body">
+                <div id="pace-chart" style="width:100%;height:220px;"></div>
+            </div>
+        </div>
+
+        <!-- REGION DEPTH + EXPLORATION REALITY -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#x1F4CA;</span> Investigation Depth
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="depth-chart" style="width:100%;height:280px;"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">
+                    <span class="icon">&#x1F30D;</span> Sky Reality Check
+                </div>
+            </div>
+            <div class="card-body" id="reality-body" style="padding:16px;">
+                <div style="color:var(--text-dim);text-align:center;">Waiting for data...</div>
+            </div>
+        </div>
+
         <!-- FINDINGS TABLE -->
         <div class="card full-width">
             <div class="card-header">
@@ -795,8 +901,17 @@ body::before {
 // DASHBOARD STATE & UPDATE LOGIC
 // ================================================================
 
-const REFRESH_INTERVAL = 4000; // ms
+const REFRESH_INTERVAL = 15000; // ms — 15s is plenty for observation
 let lastLogLength = 0;
+
+// ── Change detection: skip re-renders if data hasn't changed ──
+const _lastHash = {};
+function dataChanged(key, data) {
+    const h = JSON.stringify(data);
+    if (_lastHash[key] === h) return false;
+    _lastHash[key] = h;
+    return true;
+}
 
 // ── Plotly layout defaults ──
 const PLOTLY_BG = '#0b1029';
@@ -832,9 +947,11 @@ async function updateStatus() {
     document.getElementById('stat-findings-detail').textContent =
         `${data.n_high} high / ${data.n_medium} med / ${data.n_low} low`;
     document.getElementById('stat-high').textContent = data.n_high;
-    document.getElementById('stat-sky-pct').textContent = `${data.ra_spread_pct}%`;
+    document.getElementById('stat-sky-pct').textContent = `${data.sampled_area_sqdeg} sq°`;
     document.getElementById('stat-dec-range').textContent =
-        `RA spread · Dec: ${data.dec_range[0].toFixed(0)}° to ${data.dec_range[1].toFixed(0)}°`;
+        data.n_regions > 0
+            ? `${data.coverage_pct}% of sky · Dec: ${data.dec_range[0].toFixed(0)}° to ${data.dec_range[1].toFixed(0)}°`
+            : `of 41,253 sq° total`;
     document.getElementById('stat-leads').textContent = data.best_leads.length;
 
     // Last updated
@@ -890,6 +1007,7 @@ async function updateSkyMap() {
         document.getElementById('map-badge').textContent = '0 regions';
         return;
     }
+    if (!dataChanged('skymap', regions)) return;
 
     document.getElementById('map-badge').textContent = `${regions.length} regions`;
 
@@ -977,31 +1095,17 @@ async function updateSkyMap() {
             bordercolor: PLOTLY_GRID,
             font: { ...PLOTLY_FONT, size: 10 },
         },
-        shapes: [
-            // Galactic plane approximation (sinusoidal)
-            ...Array.from({length: 360}, (_, i) => {
-                const ra_deg = i;
-                // Simplified galactic plane in equatorial coords
-                const l = (ra_deg - 192.85) * Math.PI / 180;
-                const dec_gal = Math.asin(0.4734) * 180 / Math.PI * Math.sin(l + 0.5764);
-                return { x0: ra_deg, x1: ra_deg+1, y0: dec_gal-5, y1: dec_gal+5 };
-            }).filter((_, i) => i % 10 === 0).map(s => ({
-                type: 'rect',
-                x0: s.x0, x1: s.x1, y0: s.y0, y1: s.y1,
-                fillcolor: 'rgba(139,92,246,0.03)',
-                line: { width: 0 },
-                layer: 'below',
-            })),
-        ],
+        // Galactic plane removed — too expensive for periodic re-render
     };
 
-    Plotly.react('skymap', [traceRegions, traceFindings], layout, { responsive: true, displayModeBar: false });
+    Plotly.react('skymap', [traceRegions, traceFindings], layout, { responsive: true, displayModeBar: false, staticPlot: true });
 }
 
 
 async function updateHeatmap() {
     const data = await fetchJSON('/api/coverage-grid');
     if (!data) return;
+    if (!dataChanged('heatmap', data)) return;
 
     const trace = {
         z: data.grid,
@@ -1042,13 +1146,14 @@ async function updateHeatmap() {
         },
     };
 
-    Plotly.react('skymap-heatmap', [trace], layout, { responsive: true, displayModeBar: false });
+    Plotly.react('skymap-heatmap', [trace], layout, { responsive: true, displayModeBar: false, staticPlot: true });
 }
 
 
 async function updateToolChart() {
     const data = await fetchJSON('/api/tool-stats');
     if (!data) return;
+    if (!dataChanged('toolchart', data)) return;
 
     const tools = data.tool_regions;
     const toolNames = Object.keys(tools);
@@ -1099,13 +1204,14 @@ async function updateToolChart() {
         },
     };
 
-    Plotly.react('tool-chart', [trace], layout, { responsive: true, displayModeBar: false });
+    Plotly.react('tool-chart', [trace], layout, { responsive: true, displayModeBar: false, staticPlot: true });
 }
 
 
 async function updateTimeline() {
     const findings = await fetchJSON('/api/findings');
     if (!findings || findings.length === 0) return;
+    if (!dataChanged('timeline', findings)) return;
 
     // Group findings by hour for timeline bars
     const sigColors = { high: '#ef4444', medium: '#f59e0b', low: '#22c55e' };
@@ -1141,7 +1247,7 @@ async function updateTimeline() {
         legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(17,23,56,0.8)', bordercolor: PLOTLY_GRID, font: { ...PLOTLY_FONT, size: 10 } },
     };
 
-    Plotly.react('timeline-chart', traces, layout, { responsive: true, displayModeBar: false });
+    Plotly.react('timeline-chart', traces, layout, { responsive: true, displayModeBar: false, staticPlot: true });
 }
 
 
@@ -1207,6 +1313,173 @@ async function updateLog() {
 }
 
 
+async function updateExplorationPace() {
+    const data = await fetchJSON('/api/exploration-pace');
+    if (!data || data.cycles.length === 0) {
+        document.getElementById('pace-badge').textContent = 'No data yet';
+        return;
+    }
+    if (!dataChanged('pace', data)) return;
+
+    const lastRegions = data.cum_regions[data.cum_regions.length - 1] || 0;
+    const lastFindings = data.cum_findings[data.cum_findings.length - 1] || 0;
+    document.getElementById('pace-badge').textContent =
+        `${lastRegions} regions · ${lastFindings} findings`;
+
+    const traces = [
+        {
+            x: data.cycles, y: data.cum_regions,
+            name: 'Regions',
+            fill: 'tozeroy',
+            line: { color: '#00d4ff', width: 2 },
+            fillcolor: 'rgba(0,212,255,0.1)',
+        },
+        {
+            x: data.cycles, y: data.cum_findings,
+            name: 'Findings',
+            fill: 'tozeroy',
+            line: { color: '#ec4899', width: 2 },
+            fillcolor: 'rgba(236,72,153,0.1)',
+            yaxis: 'y2',
+        },
+    ];
+
+    const layout = {
+        paper_bgcolor: PLOTLY_PAPER,
+        plot_bgcolor: PLOTLY_BG,
+        font: PLOTLY_FONT,
+        margin: { t: 10, b: 40, l: 50, r: 50 },
+        xaxis: {
+            title: 'Cycle',
+            gridcolor: PLOTLY_GRID,
+            tickfont: PLOTLY_FONT,
+        },
+        yaxis: {
+            title: 'Regions',
+            titlefont: { color: '#00d4ff', ...PLOTLY_FONT },
+            gridcolor: PLOTLY_GRID,
+            tickfont: { ...PLOTLY_FONT, color: '#00d4ff' },
+        },
+        yaxis2: {
+            title: 'Findings',
+            titlefont: { color: '#ec4899', ...PLOTLY_FONT },
+            tickfont: { ...PLOTLY_FONT, color: '#ec4899' },
+            overlaying: 'y',
+            side: 'right',
+            gridcolor: 'transparent',
+        },
+        showlegend: true,
+        legend: {
+            x: 0.01, y: 0.99,
+            bgcolor: 'rgba(17,23,56,0.8)',
+            bordercolor: PLOTLY_GRID,
+            font: { ...PLOTLY_FONT, size: 10 },
+        },
+    };
+
+    Plotly.react('pace-chart', traces, layout, { responsive: true, displayModeBar: false, staticPlot: true });
+}
+
+
+async function updateRegionDepth() {
+    const data = await fetchJSON('/api/region-depth');
+    if (!data || data.total_regions === 0) return;
+    if (!dataChanged('depth', data)) return;
+
+    const binNames = Object.keys(data.bins);
+    const binValues = Object.values(data.bins);
+    const barColors = ['#1a365d', '#0ea5e9', '#06b6d4', '#8b5cf6', '#a855f7', '#ec4899'];
+
+    const trace = {
+        x: binNames,
+        y: binValues,
+        type: 'bar',
+        marker: {
+            color: barColors,
+            line: { color: PLOTLY_BG, width: 1 },
+        },
+        hovertemplate: '%{x} visits: <b>%{y} regions</b><extra></extra>',
+    };
+
+    const layout = {
+        paper_bgcolor: PLOTLY_PAPER,
+        plot_bgcolor: PLOTLY_BG,
+        font: PLOTLY_FONT,
+        margin: { t: 10, b: 40, l: 40, r: 10 },
+        xaxis: {
+            title: 'Visits per Region',
+            tickfont: PLOTLY_FONT,
+            gridcolor: 'transparent',
+        },
+        yaxis: {
+            title: 'Regions',
+            gridcolor: PLOTLY_GRID,
+            tickfont: PLOTLY_FONT,
+        },
+        annotations: [{
+            x: 0.98, y: 0.95,
+            xref: 'paper', yref: 'paper',
+            text: `Avg: ${data.avg_visits} · Max: ${data.max_visits}`,
+            showarrow: false,
+            font: { ...PLOTLY_FONT, size: 11, color: '#c8d6e5' },
+            bgcolor: 'rgba(17,23,56,0.8)',
+            bordercolor: PLOTLY_GRID,
+            borderwidth: 1,
+            borderpad: 4,
+        }],
+    };
+
+    Plotly.react('depth-chart', [trace], layout, { responsive: true, displayModeBar: false, staticPlot: true });
+}
+
+
+async function updateRealityCheck() {
+    const data = await fetchJSON('/api/status');
+    if (!data) return;
+    if (!dataChanged('reality', data)) return;
+
+    const regions = data.n_regions;
+    const area = data.sampled_area_sqdeg;
+    const pct = data.coverage_pct;
+    const fullSky = 41253;
+
+    // Fun comparisons
+    const fullMoonArea = 0.2;  // sq deg
+    const moonsEquiv = (area / fullMoonArea).toFixed(1);
+    const yearsToFullSky = regions > 0
+        ? Math.round(fullSky / (area || 0.001) * (data.total_cycles / Math.max(regions, 1)) * 5 / 3600 / 24 / 365)
+        : '?';
+
+    const body = document.getElementById('reality-body');
+    body.innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div style="text-align:center;padding:12px;background:var(--bg-card-alt);border-radius:8px;border:1px solid var(--border);">
+                <div style="font-size:22px;font-weight:800;color:var(--accent);">${area}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">sq° sampled</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--bg-card-alt);border-radius:8px;border:1px solid var(--border);">
+                <div style="font-size:22px;font-weight:800;color:var(--purple);">${pct}%</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">of full sky</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--bg-card-alt);border-radius:8px;border:1px solid var(--border);">
+                <div style="font-size:22px;font-weight:800;color:var(--amber);">${moonsEquiv}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">full moons of sky</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:var(--bg-card-alt);border-radius:8px;border:1px solid var(--border);">
+                <div style="font-size:22px;font-weight:800;color:var(--pink);">${regions}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">unique pointings</div>
+            </div>
+        </div>
+        <div style="margin-top:12px;padding:10px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.2);border-radius:8px;font-size:11px;color:var(--text);">
+            <span style="color:var(--purple);font-weight:700;">Reality:</span>
+            The observable sky is ${fullSky.toLocaleString()} sq°. Each Pan-STARRS pointing covers ~0.008 sq°.
+            Even professional surveys like ZTF take months to cover the sky once.
+            Quality > coverage — deep investigation of fewer regions finds more real transients.
+        </div>
+    `;
+}
+
+
 // ── HTML escaping ──
 function escapeHtml(str) {
     const div = document.createElement('div');
@@ -1225,6 +1498,9 @@ async function refreshAll() {
         updateSkyMap(),
         updateHeatmap(),
         updateToolChart(),
+        updateExplorationPace(),
+        updateRegionDepth(),
+        updateRealityCheck(),
         updateFindings(),
         updateTimeline(),
         updateLog(),

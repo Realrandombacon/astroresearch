@@ -22,6 +22,17 @@ import base64
 from pathlib import Path
 
 import numpy as np
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+# Suppress Pan-STARRS WCS deprecation warnings (cosmetic, does not affect results)
+try:
+    from astropy.wcs import FITSFixedWarning
+    warnings.filterwarnings("ignore", category=FITSFixedWarning)
+except ImportError:
+    pass
+warnings.filterwarnings("ignore", message=".*PCi_ja.*")
+warnings.filterwarnings("ignore", message=".*datfix.*")
+
 from astropy.io import fits
 from astropy.wcs import WCS
 from PIL import Image
@@ -39,10 +50,18 @@ os.makedirs(PNG_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 def read_fits_data(filepath):
-    """Read FITS image data using astropy. Returns (numpy_2d_array, header)."""
+    """Read FITS image data using astropy. Returns (numpy_2d_array, header).
+
+    IMPORTANT: header is returned as a raw astropy FITS Header object
+    (not a dict) so that WCS conversions work correctly.  Pan-STARRS
+    headers use non-standard PC001001 keywords; converting to dict and
+    back drops those keywords when the HISTORY card contains non-ASCII
+    characters, causing astropy WCS to silently fall back to a linear
+    approximation that ignores the PC matrix.
+    """
     # Try fuzzy matching first (handles coordinate rounding mismatches)
     filepath = fuzzy_find_image(filepath)
-    
+
     if not os.path.exists(filepath):
         avail = []
         if os.path.exists(IMAGES_DIR):
@@ -56,21 +75,21 @@ def read_fits_data(filepath):
         # Find the first image HDU with data
         for hdu in hdul:
             if hdu.data is not None and hdu.data.ndim >= 2:
-                header = dict(hdu.header)
+                header = hdu.header.copy()  # raw FITS Header, NOT dict
                 data = hdu.data.astype(np.float64)
                 # Track NaN fraction before replacing (for compare_images guard)
                 nan_count = np.count_nonzero(np.isnan(data))
-                header["_NAN_FRACTION"] = nan_count / data.size if data.size > 0 else 0.0
+                header["NANFRAC"] = nan_count / data.size if data.size > 0 else 0.0
                 # Handle NaN values
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
                 return data, header
 
         # If no 2D image HDU found, try primary
         if hdul[0].data is not None:
-            header = dict(hdul[0].header)
+            header = hdul[0].header.copy()  # raw FITS Header, NOT dict
             data = hdul[0].data.astype(np.float64)
             nan_count = np.count_nonzero(np.isnan(data))
-            header["_NAN_FRACTION"] = nan_count / data.size if data.size > 0 else 0.0
+            header["NANFRAC"] = nan_count / data.size if data.size > 0 else 0.0
             data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
             return data, header
 
@@ -169,12 +188,19 @@ def read_image_data(filepath):
     
     if not os.path.exists(filepath):
         avail = []
+        basename = os.path.basename(filepath)
         if os.path.exists(IMAGES_DIR):
-            avail = [f for f in os.listdir(IMAGES_DIR)
-                     if f.endswith((".fits", ".jpg", ".jpeg", ".png"))]
+            avail = sorted([f for f in os.listdir(IMAGES_DIR)
+                     if f.endswith((".fits", ".jpg", ".jpeg", ".png"))])
+        # Find close matches to help Qwen
+        import re
+        m = re.match(r'((?:cutout|warp|legacy)_[\d.]+_-?[\d.]+_[grizy])', basename)
+        prefix = m.group(1) if m else ""
+        close = [f for f in avail if f.startswith(prefix)] if prefix else []
+        hint = (f" Did you mean one of these? {close}" if close
+                else f" Use list_images() to see available files. DO NOT guess filenames!")
         raise FileNotFoundError(
-            f"Image not found: {filepath}. "
-            f"Available ({len(avail)}): {avail[:20]}"
+            f"FITS file not found: {basename}.{hint}"
         )
 
     # Detect format from magic bytes
@@ -523,21 +549,38 @@ def compare_images(data1, data2, header1=None, header2=None):
 # ---------------------------------------------------------------------------
 
 def pixel_to_radec(x, y, header):
-    """Convert pixel coordinates to RA/Dec using astropy WCS."""
+    """Convert pixel coordinates to RA/Dec using astropy WCS.
+
+    ``header`` should be a raw astropy FITS Header object (NOT a dict)
+    so that Pan-STARRS' non-standard PC001001 keywords are preserved.
+    """
+    import warnings as _w
     try:
-        w = WCS(header)
-        coords = w.pixel_to_world(x, y)
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            w = WCS(header)
+        coords = w.pixel_to_world(float(x), float(y))
         return round(coords.ra.deg, 6), round(coords.dec.deg, 6)
     except Exception:
-        # Fallback to simple linear WCS
+        # Fallback: linear WCS with PC matrix support
         crpix1 = header.get("CRPIX1", 0)
         crpix2 = header.get("CRPIX2", 0)
         crval1 = header.get("CRVAL1", 0)
         crval2 = header.get("CRVAL2", 0)
-        cd1_1 = header.get("CD1_1", header.get("CDELT1", 0))
-        cd1_2 = header.get("CD1_2", 0)
-        cd2_1 = header.get("CD2_1", 0)
-        cd2_2 = header.get("CD2_2", header.get("CDELT2", 0))
+        cdelt1 = header.get("CDELT1", header.get("CD1_1", 1e-10))
+        cdelt2 = header.get("CDELT2", header.get("CD2_2", 1e-10))
+
+        # Check for PC matrix (Pan-STARRS uses PC001001 / PC001002 etc.)
+        pc1_1 = header.get("PC1_1", header.get("PC001001", 1.0))
+        pc1_2 = header.get("PC1_2", header.get("PC001002", 0.0))
+        pc2_1 = header.get("PC2_1", header.get("PC002001", 0.0))
+        pc2_2 = header.get("PC2_2", header.get("PC002002", 1.0))
+
+        # If CD matrix is present, use it directly (overrides CDELT+PC)
+        cd1_1 = header.get("CD1_1", cdelt1 * pc1_1)
+        cd1_2 = header.get("CD1_2", cdelt1 * pc1_2)
+        cd2_1 = header.get("CD2_1", cdelt2 * pc2_1)
+        cd2_2 = header.get("CD2_2", cdelt2 * pc2_2)
 
         dx = x - crpix1
         dy = y - crpix2
@@ -687,9 +730,18 @@ def measure_photometry(image_path, ra, dec, aperture_radius=5,
     margin = sky_outer + 2
     if cx_int < margin or cx_int >= nx - margin or cy_int < margin or cy_int >= ny - margin:
         # Calculate how far off-image the target is to give a helpful error
-        # Extract image center RA/Dec from filename or WCS
-        img_center_ra = header.get("CRVAL1", None)
-        img_center_dec = header.get("CRVAL2", None)
+        # Use WCS to find true image center (CRVAL is the skycell ref, not cutout center)
+        try:
+            import warnings as _w2
+            with _w2.catch_warnings():
+                _w2.simplefilter("ignore")
+                _wcs = WCS(raw_header)
+            _center = _wcs.pixel_to_world(nx / 2.0, ny / 2.0)
+            img_center_ra = _center.ra.deg
+            img_center_dec = _center.dec.deg
+        except Exception:
+            img_center_ra = header.get("CRVAL1", None)
+            img_center_dec = header.get("CRVAL2", None)
         offset_hint = ""
         if img_center_ra is not None and img_center_dec is not None:
             # Estimate angular separation
@@ -866,12 +918,20 @@ def main():
         print(json.dumps(result, indent=2))
 
     elif args.command == "compare":
-        data1, h1 = read_image_data(args.img1)
-        data2, h2 = read_image_data(args.img2)
+        try:
+            data1, h1 = read_image_data(args.img1)
+        except FileNotFoundError as e:
+            print(json.dumps({"error": f"img1 not found: {e}. Use list_images() to see available files."}))
+            sys.exit(0)
+        try:
+            data2, h2 = read_image_data(args.img2)
+        except FileNotFoundError as e:
+            print(json.dumps({"error": f"img2 not found: {e}. Use list_images() to see available files."}))
+            sys.exit(0)
 
         # --- NaN guard: reject images that are mostly empty ---
-        nan_frac1 = h1.get("_NAN_FRACTION", 0.0)
-        nan_frac2 = h2.get("_NAN_FRACTION", 0.0)
+        nan_frac1 = h1.get("NANFRAC", 0.0)
+        nan_frac2 = h2.get("NANFRAC", 0.0)
         NAN_THRESHOLD = 0.5  # reject if >50% NaN
 
         if nan_frac1 > NAN_THRESHOLD or nan_frac2 > NAN_THRESHOLD:
@@ -930,19 +990,19 @@ def main():
                     data1[combined_bad] = 0.0
                     data2[combined_bad] = 0.0
                     nan_frac_combined = n_masked / combined_bad.size
-                    h1["_MASKED_PIXELS"] = n_masked
-                    h1["_MASKED_FRACTION"] = round(nan_frac_combined, 3)
+                    h1["MSKPIX"] = n_masked
+                    h1["MSKFRAC"] = round(nan_frac_combined, 3)
 
         result = compare_images(data1, data2, h1, h2)
         result["epoch1"] = args.img1
         result["epoch2"] = args.img2
 
         # Add NaN masking info if applicable
-        if "_MASKED_FRACTION" in h1:
-            result["nan_masked_fraction"] = h1["_MASKED_FRACTION"]
+        if "MSKFRAC" in h1:
+            result["nan_masked_fraction"] = h1["MSKFRAC"]
             result["nan_note"] = (
-                f"{h1['_MASKED_PIXELS']} edge pixels masked "
-                f"({h1['_MASKED_FRACTION']:.0%} of image) — "
+                f"{h1['MSKPIX']} edge pixels masked "
+                f"({h1['MSKFRAC']:.0%} of image) — "
                 f"these were NaN in one or both epochs and excluded from analysis."
             )
 
