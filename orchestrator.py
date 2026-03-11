@@ -154,14 +154,18 @@ def update_memory(mem, cycle_num, tool_calls_executed, visited_regions):
 
         if ra is None or dec is None:
             continue
+        try:
+            ra_f, dec_f = float(ra), float(dec)
+        except (ValueError, TypeError):
+            continue
 
-        region_key = f"{round(float(ra),1)},{round(float(dec),1)}"
+        region_key = f"{round(ra_f,1)},{round(dec_f,1)}"
 
         # ------ Update region entry ------
         if region_key not in mem["regions"]:
             mem["regions"][region_key] = {
-                "ra": round(float(ra), 2),
-                "dec": round(float(dec), 2),
+                "ra": round(ra_f, 2),
+                "dec": round(dec_f, 2),
                 "visits": 0,
                 "tools_used": [],
                 "outcomes": [],
@@ -224,7 +228,7 @@ def update_memory(mem, cycle_num, tool_calls_executed, visited_regions):
             reg["outcomes"].append(f"finding {fid} ({sig})")
             # If high significance, add to best_leads
             if sig == "high":
-                lead = {"ra": round(float(ra), 2), "dec": round(float(dec), 2),
+                lead = {"ra": round(ra_f, 2), "dec": round(dec_f, 2),
                         "finding_id": fid, "why": desc, "cycle": cycle_num}
                 # Avoid duplicate leads for same region
                 existing_ras = [l["ra"] for l in mem["best_leads"]]
@@ -242,8 +246,6 @@ def update_memory(mem, cycle_num, tool_calls_executed, visited_regions):
 
         # ------ Sky coverage ------
         try:
-            dec_f = float(dec)
-            ra_f = float(ra)
             if dec_f < mem["sky_coverage"]["dec_min"]:
                 mem["sky_coverage"]["dec_min"] = dec_f
             if dec_f > mem["sky_coverage"]["dec_max"]:
@@ -388,16 +390,22 @@ SEED_TARGETS = [
 
 def _region_key(ra, dec, precision=1):
     """Round coords to create a region bucket key."""
-    return (round(float(ra), precision), round(float(dec), precision))
+    try:
+        return (round(float(ra), precision), round(float(dec), precision))
+    except (ValueError, TypeError):
+        return (0.0, 0.0)
 
 def _tool_cache_key(tool_name, params):
     """Create a hashable key for a tool call based on name + numeric params."""
+    def _safe_float(v):
+        try:
+            return round(float(v), 2) if v is not None else None
+        except (ValueError, TypeError):
+            return None
     ra = params.get("ra", None)
     dec = params.get("dec", None)
     radius = params.get("radius", params.get("size", None))
-    return (tool_name, round(float(ra), 2) if ra else None,
-            round(float(dec), 2) if dec else None,
-            round(float(radius), 2) if radius else None)
+    return (tool_name, _safe_float(ra), _safe_float(dec), _safe_float(radius))
 
 AVAILABLE_TOOLS = {
     "search_region": {
@@ -1404,12 +1412,21 @@ def _dismiss_lead(memory, ra=0, dec=0, reason="", **kwargs):
             "timestamp": datetime.datetime.now().isoformat(),
         })
 
+    if removed == 0:
+        return {
+            "status": "no_leads",
+            "leads_removed": 0,
+            "reason": reason,
+            "WARNING": f"No leads exist near RA={ra}, Dec={dec} — nothing to dismiss. "
+                       f"If this region is done, use mark_exhausted() once, then list_unexplored() to move on.",
+        }
+
     return {
         "status": "ok",
         "leads_removed": removed,
         "reason": reason,
         "message": f"Dismissed {removed} lead(s) near RA={ra}, Dec={dec}. "
-                   f"This region will no longer appear in your priority list.",
+                   f"Use list_unexplored() to pick a new region.",
     }
 
 
@@ -1503,6 +1520,20 @@ def _mark_exhausted(memory, ra=0, dec=0, reason="", **kwargs):
         }
 
     reg = memory["regions"][region_key]
+
+    # If already exhausted, return a forceful STOP message
+    if reg.get("exhausted"):
+        return {
+            "status": "already_exhausted",
+            "region": region_key,
+            "exhausted": True,
+            "WARNING": (
+                f"STOP — Region RA={ra}, Dec={dec} is ALREADY EXHAUSTED. "
+                f"Do NOT call mark_exhausted again. "
+                f"Use list_unexplored() NOW to pick a NEW region and start downloading data there."
+            ),
+        }
+
     reg["exhausted"] = True
     if "notes" not in reg:
         reg["notes"] = []
@@ -1528,7 +1559,7 @@ def _mark_exhausted(memory, ra=0, dec=0, reason="", **kwargs):
         "reason": reason,
         "message": f"Region RA={ra}, Dec={dec} marked as EXHAUSTED. "
                    f"{leads_removed} lead(s) also dismissed. "
-                   f"This region will be deprioritized in future summaries. Move on to fresh targets!",
+                   f"Use list_unexplored() NOW to pick a new region.",
     }
 
 
@@ -2444,7 +2475,7 @@ def main():
         # ===============================================================
         # INNER TURN LOOP — Qwen acts, sees results, acts again
         # ===============================================================
-        MAX_TURNS_PER_CYCLE = 5
+        MAX_TURNS_PER_CYCLE = 10
         consecutive_failures = 0
         no_progress_count = 0
         previous_results = []
