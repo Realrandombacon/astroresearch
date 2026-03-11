@@ -2489,38 +2489,9 @@ def main():
                     else:
                         current_region_cycles += 1
 
-                    # --- Anti-loop: VISIT CEILING — auto-exhaust overvisited regions ---
-                    # NOTE: A thorough investigation (download + detect + compare + validate
-                    # + photometry) easily uses 15-30 tool calls on one region. Set ceiling
-                    # high enough to let Qwen work deeply.
-                    VISIT_CEILING = 50
-                    region_key_str = f"{round(float(ra), 1)},{round(float(dec), 1)}"
-                    mem_region = memory.get("regions", {}).get(region_key_str)
-                    if mem_region and mem_region.get("visits", 0) >= VISIT_CEILING and not mem_region.get("exhausted"):
-                        log("WARN", f"VISIT CEILING: RA={ra}, Dec={dec} has {mem_region['visits']} visits — auto-exhausting")
-                        mem_region["exhausted"] = True
-                        if "notes" not in mem_region:
-                            mem_region["notes"] = []
-                        mem_region["notes"].append({
-                            "text": f"[AUTO-EXHAUSTED] Visit ceiling ({VISIT_CEILING}) reached. Region force-closed.",
-                            "cycle": memory.get("total_cycles_all_runs", 0),
-                            "timestamp": datetime.datetime.now().isoformat(),
-                        })
-                        memory["best_leads"] = [
-                            l for l in memory.get("best_leads", [])
-                            if not (abs(l["ra"] - float(ra)) < 1.5 and abs(l["dec"] - float(dec)) < 1.5)
-                        ]
-                        rand_ra = round(random.uniform(0, 360), 2)
-                        rand_dec = round(random.uniform(-30, 80), 2)
-                        result = {
-                            "blocked": True,
-                            "message": f"⚠ VISIT CEILING: This region (RA={ra}, Dec={dec}) has been visited {mem_region['visits']} times and is now EXHAUSTED. "
-                                       f"Explore a NEW region instead. Try: search_region(ra={rand_ra}, dec={rand_dec}, radius=0.05)"
-                        }
-                        turn_results.append({"tool": tool_name, "params": params, "result": result})
-                        cycle_summary_parts.append(f"{tool_name}: BLOCKED (visit ceiling)")
-                        save_memory(memory)
-                        continue
+                    # VISIT CEILING — DISABLED
+                    # Qwen manages region transitions autonomously via
+                    # mark_exhausted / list_unexplored. No need to force-close.
 
                 # --- Anti-loop: cooldown-based duplicate prevention ---
                 cache_key = _tool_cache_key(tool_name, params)
@@ -2697,78 +2668,15 @@ def main():
                 recent_regions = recent_regions[-25:]
 
         # --- Stuck region breaker: auto-detect semantic loops ---
-        # Detects TWO patterns:
-        # 1) Consecutive: same region for 25+ cycles in a row
-        # 2) Alternating: only 2 unique regions in the last 20 cycles
-        # NOTE: Qwen's proper workflow (download→detect→compare→validate→photometry)
-        # legitimately stays on one region for many cycles. A thorough investigation
-        # can take 15-20 cycles (75-100 tool calls). Only intervene for
-        # genuine stuck loops, not deep investigation.
-        STUCK_THRESHOLD = 25
-        ALTERNATING_WINDOW = 20
-        ALTERNATING_MAX_UNIQUE = 2
-        used_write_tools = any(
-            r.get("tool") in ("dismiss_lead", "add_note", "mark_exhausted")
-            for r in previous_results
-        )
-
-        stuck_detected = False
-        stuck_regions_to_exhaust = []
-
-        # Pattern 1: Consecutive
-        if current_region_cycles >= STUCK_THRESHOLD and not used_write_tools and current_region is not None:
-            stuck_detected = True
-            stuck_regions_to_exhaust = [current_region]
-            log("WARN", f"STUCK LOOP (consecutive): {current_region_cycles} cycles on RA={current_region[0]}, Dec={current_region[1]}")
-
-        # Pattern 2: Alternating (e.g., A→B→A→B→A→B)
-        if not stuck_detected and len(recent_regions) >= ALTERNATING_WINDOW:
-            window = recent_regions[-ALTERNATING_WINDOW:]
-            unique_in_window = set(window)
-            if len(unique_in_window) <= ALTERNATING_MAX_UNIQUE:
-                stuck_detected = True
-                stuck_regions_to_exhaust = list(unique_in_window)
-                log("WARN", f"STUCK LOOP (alternating): only {len(unique_in_window)} unique regions in last {ALTERNATING_WINDOW} cycles: {unique_in_window}")
-
-        if stuck_detected:
-            for stuck_region in stuck_regions_to_exhaust:
-                stuck_ra, stuck_dec = stuck_region
-                region_key = f"{round(stuck_ra, 1)},{round(stuck_dec, 1)}"
-                if region_key in memory.get("regions", {}):
-                    reg = memory["regions"][region_key]
-                    if not reg.get("exhausted"):
-                        reg["exhausted"] = True
-                        if "notes" not in reg:
-                            reg["notes"] = []
-                        reg["notes"].append({
-                            "text": f"[AUTO-EXHAUSTED] Orchestrator detected stuck loop. Region force-closed after {reg.get('visits', 0)} visits.",
-                            "cycle": memory.get("total_cycles_all_runs", 0),
-                            "timestamp": datetime.datetime.now().isoformat(),
-                        })
-                        log("WARN", f"Auto-exhausted region {region_key}")
-                # Remove matching leads
-                memory["best_leads"] = [
-                    l for l in memory.get("best_leads", [])
-                    if not (abs(l["ra"] - stuck_ra) < 1.5 and abs(l["dec"] - stuck_dec) < 1.5)
-                ]
-
-            # Pick a random fresh region for the nudge
-            rand_ra = round(random.uniform(0, 360), 2)
-            rand_dec = round(random.uniform(-30, 80), 2)
-            regions_str = ", ".join(f"({r[0]},{r[1]})" for r in stuck_regions_to_exhaust)
-            previous_results.append({
-                "tool": "system",
-                "result": {
-                    "message": f"⚠ STUCK LOOP DETECTED: You keep returning to the same regions: {regions_str}. "
-                               f"ALL have been AUTO-EXHAUSTED. You MUST move to a COMPLETELY NEW region. "
-                               f"Try: TOOL: search_region(ra={rand_ra}, dec={rand_dec}, radius=0.05)"
-                }
-            })
-            # Reset state
-            current_region = None
-            current_region_cycles = 0
-            recent_regions.clear()
-            save_memory(memory)
+        # STUCK LOOP DETECTION — DISABLED
+        # Previously auto-exhausted regions after N consecutive tool calls.
+        # Removed because: (1) counter was per-tool-call not per-cycle,
+        # so threshold of 25 triggered after only ~5 real cycles;
+        # (2) Qwen's improved pipeline (download→detect→compare→photometry→
+        # validate) legitimately needs many cycles on one region;
+        # (3) Qwen now handles region transitions on its own via
+        # mark_exhausted / list_unexplored.
+        # If stuck loops reappear, re-enable with a TRUE cycle counter.
 
         summary = "; ".join(cycle_summary_parts)
         research_history.append({
