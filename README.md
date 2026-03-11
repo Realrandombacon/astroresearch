@@ -1,8 +1,10 @@
-# AutoResearch
+# AstroResearch
 
 Autonomous astronomical anomaly detection powered by a local LLM agent.
 
-AutoResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explore the sky, download real multi-epoch survey data, analyze images, and flag potential discoveries — all without human intervention.
+Inspired by Andrej Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — which demonstrated that LLM agents can autonomously conduct research — AstroResearch applies the same philosophy to observational astronomy. Instead of papers and code, this agent explores the real sky.
+
+AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explore the sky, download real multi-epoch survey data, analyze images, and flag potential discoveries — all without human intervention.
 
 ## How it works
 
@@ -163,6 +165,10 @@ The orchestrator uses a structured prompt that guides the LLM to:
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Acknowledgments
+
+This project is inspired by [autoresearch](https://github.com/karpathy/autoresearch) by Andrej Karpathy, which showed that LLM agents can autonomously drive the research cycle. AstroResearch adapts that idea to observational astronomy — swapping literature search for sky surveys, and paper analysis for multi-epoch image comparison.
 
 ## Contributing
 
