@@ -610,6 +610,7 @@ def log(level, message, **extra):
         "WARN":  C.WARN,
         "ERROR": C.ERROR,
         "TOOL":  "\033[96m",
+        "RESULT": "\033[38;5;141m",   # soft purple for tool results
         "FIND":  C.FIND,
         "THINK": C.THOUGHT,
     }
@@ -630,6 +631,14 @@ def log(level, message, **extra):
         console_msg = f"  {ts_str} {prefix} {C.DIM}{rest}{C.RESET}"
     elif level == "TOOL":
         console_msg = f"  {ts_str} {lc}{C.BOLD}🔧 {level}{C.RESET} {message}"
+    # Special rendering for tool results — show tool name colored + dimmed result
+    elif level == "RESULT" and "|" in message:
+        parts = message.split("|", 1)
+        tool_name = parts[0].strip()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        color, emoji = _tool_color(tool_name)
+        prefix = f"{color}{emoji} {tool_name}{C.RESET}"
+        console_msg = f"  {ts_str} {prefix} {C.DIM}→ {rest}{C.RESET}"
     elif level == "OK":
         console_msg = f"  {ts_str} {C.OK}{C.BOLD}✅ {level}{C.RESET} {C.OK}{message}{C.RESET}"
     elif level == "WARN":
@@ -1525,6 +1534,135 @@ def _mark_exhausted(memory, ra=0, dec=0, reason="", **kwargs):
     }
 
 
+def _summarize_result(tool_name, result, max_len=300):
+    """Create a concise log-friendly summary of a tool result.
+
+    Returns a string ≤ max_len chars showing the most useful fields.
+    """
+    if not isinstance(result, dict):
+        s = str(result)
+        return s[:max_len] + "…" if len(s) > max_len else s
+
+    # Errors — always show in full (they're short)
+    if "error" in result:
+        return f"ERROR: {result['error'][:max_len]}"
+
+    # Per-tool summaries: pick the most informative fields
+    parts = []
+
+    # Gaia
+    if tool_name == "query_gaia":
+        n = result.get("n_sources", "?")
+        parts.append(f"n_sources={n}")
+        for src in result.get("sources", [])[:2]:
+            mag = src.get("phot_g_mean_mag", "?")
+            pm = ""
+            pmra = src.get("pmra")
+            pmdec = src.get("pmdec")
+            if pmra is not None and pmdec is not None:
+                try:
+                    pm_total = (float(pmra)**2 + float(pmdec)**2)**0.5
+                    pm = f" pm={pm_total:.1f}mas/yr"
+                except (ValueError, TypeError):
+                    pass
+            vc = src.get("variable_class", "")
+            vc_str = f" var={vc}" if vc else ""
+            parts.append(f"G={mag}{pm}{vc_str}")
+
+    # ALeRCE
+    elif tool_name == "check_transients":
+        n = result.get("n_matches", 0)
+        parts.append(f"n_matches={n}")
+        for obj in result.get("objects", [])[:2]:
+            cn = obj.get("class_name", "?")
+            cp = obj.get("class_probability", "?")
+            parts.append(f"{obj.get('oid','?')}={cn}({cp})")
+
+    # Photometry
+    elif tool_name == "measure_photometry":
+        mag = result.get("magnitude")
+        snr = result.get("snr")
+        flux = result.get("net_flux")
+        if mag is not None:
+            parts.append(f"mag={mag:.3f}" if isinstance(mag, float) else f"mag={mag}")
+        if snr is not None:
+            parts.append(f"SNR={snr:.1f}" if isinstance(snr, float) else f"SNR={snr}")
+        if flux is not None:
+            parts.append(f"flux={flux:.1f}" if isinstance(flux, float) else f"flux={flux}")
+
+    # detect_sources
+    elif tool_name == "detect_sources":
+        n = result.get("n_sources", "?")
+        parts.append(f"n_sources={n}")
+        brightest = result.get("brightest_flux") or result.get("sources", [{}])[0].get("flux") if result.get("sources") else None
+        if brightest:
+            parts.append(f"brightest_flux={brightest}")
+
+    # compare_images
+    elif tool_name == "compare_images":
+        n = result.get("n_significant", result.get("n_changed", "?"))
+        parts.append(f"n_significant={n}")
+        max_sig = result.get("max_sigma", "?")
+        parts.append(f"max_sigma={max_sig}")
+
+    # search_region / search_target
+    elif tool_name in ("search_region", "search_target"):
+        n = result.get("total_results", result.get("n_results", "?"))
+        parts.append(f"results={n}")
+        name = result.get("resolved_name") or result.get("target")
+        if name:
+            parts.append(f"name={name}")
+
+    # multi_epoch
+    elif tool_name == "multi_epoch":
+        n = result.get("n_groups", "?")
+        parts.append(f"groups={n}")
+
+    # SIMBAD
+    elif tool_name == "simbad_check":
+        n = result.get("n_known_objects", "?")
+        parts.append(f"n_objects={n}")
+        for obj in result.get("objects", [])[:2]:
+            parts.append(f"{obj.get('name','?')}({obj.get('type','?')})")
+
+    # ZTF
+    elif tool_name == "ztf_lightcurve":
+        n = result.get("total_points", 0)
+        var = result.get("variability_flag", False)
+        parts.append(f"points={n} variable={var}")
+
+    # Downloads
+    elif tool_name in ("download_cutout", "download_multiepoch", "download_legacy"):
+        n = result.get("n_images", result.get("n_downloaded", "?"))
+        parts.append(f"n_images={n}")
+        files = result.get("files", result.get("images", []))
+        if files and isinstance(files, list):
+            fnames = [os.path.basename(f) if isinstance(f, str) else f.get("filename", "?") for f in files[:3]]
+            parts.append(f"files=[{', '.join(fnames)}]")
+
+    # list_images
+    elif tool_name == "list_images":
+        n = result.get("n_images", "?")
+        parts.append(f"n_images={n}")
+
+    # Generic fallback — show top-level keys and short values
+    if not parts:
+        for k, v in result.items():
+            if k.startswith("_"):
+                continue
+            sv = str(v)
+            if len(sv) > 60:
+                sv = sv[:57] + "…"
+            parts.append(f"{k}={sv}")
+            if len(", ".join(parts)) > max_len:
+                break
+
+    summary = ", ".join(parts)
+    if len(summary) > max_len:
+        summary = summary[:max_len - 1] + "…"
+    return summary
+
+
 def execute_tool(tool_name, params, memory=None):
     """Execute a tool by running the appropriate Python script."""
     if tool_name not in AVAILABLE_TOOLS:
@@ -2381,6 +2519,10 @@ def main():
                     "png_path": result.get("png_path", ""),
                     "prompt": result.get("prompt", ""),
                 }
+
+            # --- Log the result for debugging ---
+            result_summary = _summarize_result(tool_name, result)
+            log("RESULT", f"{tool_name}|{result_summary}")
 
             # --- Track when this call was made ---
             tool_call_history[cache_key] = cycle_num
