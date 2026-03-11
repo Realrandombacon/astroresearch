@@ -371,12 +371,35 @@ def analyze_image_with_vision(filepath, prompt=None, model="qwen3.5:4b"):
 # Source detection (numpy-based, much faster than pure Python)
 # ---------------------------------------------------------------------------
 
-def detect_sources_simple(data, threshold_sigma=3.0, min_size=3):
-    """Detect point sources using sigma-clipping peak detection with numpy."""
+def detect_sources_simple(data, threshold_sigma=3.0, min_size=3, nan_mask=None):
+    """Detect point sources using sigma-clipping peak detection with numpy.
+
+    nan_mask: optional boolean array (same shape as data) where True = was NaN.
+              Sources near NaN boundaries are rejected as edge artifacts.
+    """
     if data is None:
         return []
 
     nrows, ncols = data.shape
+
+    # Build dilated NaN mask to reject sources near NaN boundaries.
+    # Pan-STARRS warp images have NaN at tile edges; pixels adjacent to NaN
+    # have interpolation artifacts that mimic real sources.
+    nan_boundary = None
+    if nan_mask is not None and np.any(nan_mask):
+        NAN_DILATE = 4  # reject sources within 4px of any NaN
+        try:
+            from scipy.ndimage import binary_dilation
+            nan_boundary = binary_dilation(nan_mask, iterations=NAN_DILATE)
+        except ImportError:
+            nan_boundary = nan_mask.copy()
+            for _ in range(NAN_DILATE):
+                dilated = np.zeros_like(nan_boundary)
+                dilated[1:, :] |= nan_boundary[:-1, :]
+                dilated[:-1, :] |= nan_boundary[1:, :]
+                dilated[:, 1:] |= nan_boundary[:, :-1]
+                dilated[:, :-1] |= nan_boundary[:, 1:]
+                nan_boundary = dilated | nan_boundary
 
     # Statistics (with sigma clipping for robust background)
     mean_val = np.mean(data)
@@ -406,6 +429,10 @@ def detect_sources_simple(data, threshold_sigma=3.0, min_size=3):
                 if val != data[y, x] or np.sum(neighborhood == val) > 1:
                     if val < np.max(neighborhood):
                         continue
+
+            # Reject sources near NaN boundaries (edge artifacts)
+            if nan_boundary is not None and nan_boundary[y, x]:
+                continue
 
             # Centroid refinement in 3x3 box
             box = data[y-1:y+2, x-1:x+2] - mean_val
@@ -901,7 +928,21 @@ def main():
 
     if args.command == "detect-sources":
         data, header = read_image_data(args.image)
-        sources = detect_sources_simple(data, threshold_sigma=args.sigma)
+
+        # Get NaN mask from original FITS to filter edge artifacts
+        _nan_mask = None
+        _img_path = fuzzy_find_image(args.image)
+        if _img_path.lower().endswith('.fits'):
+            try:
+                with fits.open(_img_path) as _hdul:
+                    for _hdu in _hdul:
+                        if _hdu.data is not None and _hdu.data.ndim >= 2:
+                            _nan_mask = np.isnan(_hdu.data)
+                            break
+            except Exception:
+                pass
+
+        sources = detect_sources_simple(data, threshold_sigma=args.sigma, nan_mask=_nan_mask)
 
         # Add WCS coordinates
         for src in sources:
@@ -985,6 +1026,22 @@ def main():
             if mask1 is not None and mask2 is not None:
                 # combined_bad = True where EITHER image had NaN
                 combined_bad = mask1 | mask2
+                # Dilate by 3 pixels: NaN boundary halos cause interpolation
+                # artifacts that look like real sources. Expanding the mask
+                # by 3px catches these edge artifacts.
+                NAN_DILATE = 3
+                try:
+                    from scipy.ndimage import binary_dilation
+                    combined_bad = binary_dilation(combined_bad, iterations=NAN_DILATE)
+                except ImportError:
+                    # Manual dilation fallback if scipy not available
+                    for _ in range(NAN_DILATE):
+                        dilated = np.zeros_like(combined_bad)
+                        dilated[1:, :] |= combined_bad[:-1, :]
+                        dilated[:-1, :] |= combined_bad[1:, :]
+                        dilated[:, 1:] |= combined_bad[:, :-1]
+                        dilated[:, :-1] |= combined_bad[:, 1:]
+                        combined_bad = dilated | combined_bad
                 n_masked = int(np.count_nonzero(combined_bad))
                 if n_masked > 0:
                     data1[combined_bad] = 0.0
