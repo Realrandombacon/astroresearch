@@ -203,6 +203,19 @@ def update_memory(mem, cycle_num, tool_calls_executed, visited_regions):
         elif tool_name == "download_legacy":
             n = result.get("n_images", 0)
             reg["outcomes"].append(f"legacy: {n} bands downloaded")
+        elif tool_name == "query_gaia":
+            n = result.get("n_sources", 0)
+            reg["outcomes"].append(f"gaia: {n} sources")
+        elif tool_name == "check_transients":
+            n = result.get("n_matches", 0)
+            reg["outcomes"].append(f"alerce: {n} known transients")
+        elif tool_name == "measure_photometry":
+            mag = result.get("magnitude")
+            snr = result.get("snr")
+            if mag is not None:
+                reg["outcomes"].append(f"photometry: mag={mag}, SNR={snr}")
+            else:
+                reg["outcomes"].append("photometry: source not detected")
         elif tool_name == "log_finding":
             fid = result.get("finding_id", "?")
             sig = params.get("significance", "medium")
@@ -493,6 +506,22 @@ AVAILABLE_TOOLS = {
         "usage": "mark_exhausted(ra=<degrees>, dec=<degrees>, reason='<summary of what was done>')",
         "script": "__internal__",
     },
+    # --- Validation tools: verify candidates before logging ---
+    "query_gaia": {
+        "description": "Query Gaia DR3 catalog for sources at a position. Returns parallax (distance), proper motion, magnitude, and variability classification. Use to check if a transient candidate is a known variable star or high-proper-motion object.",
+        "usage": "query_gaia(ra=<degrees>, dec=<degrees>, radius=5)",
+        "script": "tools/astro_query.py query-gaia --ra {ra} --dec {dec} --radius {radius}",
+    },
+    "check_transients": {
+        "description": "Check ALeRCE/ZTF broker for known transients at a position. Returns ML classification (SN, AGN, variable star, etc.) and observation history. Use BEFORE logging a finding to check if it's already known!",
+        "usage": "check_transients(ra=<degrees>, dec=<degrees>, radius=5)",
+        "script": "tools/astro_query.py check-transients --ra {ra} --dec {dec} --radius {radius}",
+    },
+    "measure_photometry": {
+        "description": "Measure calibrated aperture photometry of a source in a FITS image. Returns magnitude, flux, SNR. Use to get precise brightness measurements for transient candidates. Requires RA/Dec of the target and a FITS image path.",
+        "usage": "measure_photometry(image='data/images/<file>.fits', ra=<degrees>, dec=<degrees>)",
+        "script": "tools/image_analysis.py measure-photometry --image {image} --ra {ra} --dec {dec} --aperture {aperture} --inner {inner} --outer {outer}",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -560,6 +589,9 @@ TOOL_STYLE = {
     "query_memory":    (C.MEMORY,   "🧠"),
     "list_findings":   (C.MEMORY,   "📋"),
     "list_unexplored": (C.MEMORY,   "🗺️"),
+    "query_gaia":      (C.SIMBAD,   "🌟"),
+    "check_transients":(C.ZTF,      "🚨"),
+    "measure_photometry":(C.DETECT, "📐"),
 }
 
 def _tool_color(tool_name):
@@ -675,6 +707,8 @@ def print_cycle_summary(cycle_num, summary_parts):
             "list_images": "list_images", "query_memory": "query_memory",
             "list_findings": "list_findings", "list_unexplored": "list_unexplored",
             "convert_to_png": "convert_to_png",
+            "query_gaia": "query_gaia", "check_transients": "check_transients",
+            "measure_photometry": "measure_photometry",
         }
         matched_tool = None
         for prefix, tname in tool_map.items():
@@ -854,6 +888,9 @@ TOOL_TIMEOUTS = {
     "list_images": 10,        # Just listing files
     "convert_to_png": 20,     # FITS conversion
     "log_finding": 5,         # Internal, instant
+    "query_gaia": 20,         # Single Gaia TAP query
+    "check_transients": 30,   # ALeRCE API (up to 2 HTTP requests)
+    "measure_photometry": 15, # CPU-only aperture photometry
 }
 DEFAULT_TOOL_TIMEOUT = 30
 
@@ -1477,6 +1514,10 @@ def execute_tool(tool_name, params, memory=None):
         "band": "filter",          # Qwen might say band='g' instead of filter='g'
         "num_epochs": "epochs",
         "n_epochs": "epochs",
+        "aperture_radius": "aperture",
+        "sky_inner": "inner",
+        "sky_outer": "outer",
+        "radius_arcsec_gaia": "radius",
     }
     for alt, canonical in aliases.items():
         if alt in params and canonical not in params:
@@ -1492,7 +1533,15 @@ def execute_tool(tool_name, params, memory=None):
         params.setdefault("size", 256)
     elif tool_name == "download_cutout":
         params.setdefault("size", 1.0)
-    
+    elif tool_name == "query_gaia":
+        params.setdefault("radius", 5)
+    elif tool_name == "check_transients":
+        params.setdefault("radius", 5)
+    elif tool_name == "measure_photometry":
+        params.setdefault("aperture", 5)
+        params.setdefault("inner", 10)
+        params.setdefault("outer", 15)
+
     # Normalize image file paths (Qwen sometimes outputs broken paths)
     for path_key in ("image", "img1", "img2"):
         if path_key in params and isinstance(params[path_key], str):
@@ -1815,8 +1864,24 @@ How to investigate a region thoroughly (call multiple tools per cycle!):
     TOOL: download_legacy(ra=..., dec=..., bands='grz')
     TOOL: compare_images(img1='data/images/cutout_..._g.fits', img2='data/images/legacy_..._g.fits')
 
-  Cycle 5 — Conclusion:
-    TOOL: log_finding(ra=..., dec=..., description='Brightening transient: source at x=145,y=200 increased 2.3 magnitudes between MJD 57234 and MJD 59012 in g-band. Confirmed in Legacy Survey cross-check.', significance='high')
+  Cycle 5 — VALIDATE before logging (NEW! Use these to eliminate false positives):
+    TOOL: query_gaia(ra=..., dec=..., radius=5)
+    TOOL: check_transients(ra=..., dec=..., radius=5)
+    TOOL: measure_photometry(image='data/images/warp_..._g_ep1_mjd....fits', ra=..., dec=...)
+    TOOL: measure_photometry(image='data/images/warp_..._g_ep3_mjd....fits', ra=..., dec=...)
+
+  Cycle 6 — Conclusion (only if validation passed!):
+    TOOL: log_finding(ra=..., dec=..., description='Brightening transient: source increased 2.3 mag between MJD 57234 and MJD 59012 in g-band. NOT in Gaia variable catalog. No ALeRCE match — potentially novel! Aperture photometry: mag=19.2→16.9.', significance='high')
+
+VALIDATION WORKFLOW — BEFORE logging ANY finding with significance='high':
+  1. query_gaia(ra, dec) → If variable_class is set, it's a KNOWN variable star (not novel)
+     High proper motion (pm_total > 50 mas/yr) means it's a nearby moving star, not a transient
+  2. check_transients(ra, dec) → If ALeRCE returns matches, the transient is ALREADY KNOWN
+     Check class_name: SN=supernova, AGN=active galaxy, VS=variable star, bogus=artifact
+  3. measure_photometry(image, ra, dec) → Get precise magnitude in EACH epoch
+     Compare magnitudes to quantify the brightness change
+     Include these numbers in your log_finding description!
+  4. Only log_finding with significance='high' if the candidate SURVIVES all checks
 
 detect_sources is your most powerful tool — it gives you hard numbers:
   - Exact pixel positions and RA/Dec coordinates of every source
@@ -1878,10 +1943,16 @@ Tool rules:
 - You CAN call the same tool again with different parameters (e.g. different sigma, different image)
 - Before revisiting a region, use query_memory to check what you already did there
 
+Validation tools — use these to verify candidates BEFORE logging findings:
+- query_gaia(ra=150.0, dec=30.0, radius=5) — check Gaia DR3 for known variable stars, proper motion, distance
+- check_transients(ra=150.0, dec=30.0, radius=5) — check ALeRCE/ZTF broker for known transients
+- measure_photometry(image='data/images/warp_...fits', ra=150.0, dec=30.0) — precise aperture photometry (magnitude, flux, SNR)
+
 Coordinates:
 - RA in degrees (0-360), Dec in degrees (-90 to +90)
 - MAST radius in degrees (0.01-1.0), SIMBAD radius in arcsec (1-300)
 - ZTF radius in arcsec (use 5, max 10 — larger will timeout!)
+- Gaia/ALeRCE radius in arcsec (default 5)
 - Northern sky (Dec > -30) has best ZTF coverage
 
 Format (MUST use parentheses):
@@ -1890,6 +1961,9 @@ Format (MUST use parentheses):
   TOOL: download_legacy(ra=150.0, dec=30.0, bands='grz')
   TOOL: detect_sources(image='data/images/cutout_150.0000_30.0000_g.fits', sigma=3.0)
   TOOL: compare_images(img1='data/images/warp_150.0000_30.0000_g_ep1_mjd57234.5.fits', img2='data/images/warp_150.0000_30.0000_g_ep3_mjd59012.3.fits')
+  TOOL: query_gaia(ra=150.0, dec=30.0, radius=5)
+  TOOL: check_transients(ra=150.0, dec=30.0, radius=5)
+  TOOL: measure_photometry(image='data/images/warp_150.0000_30.0000_g_ep1_mjd57234.5.fits', ra=150.0, dec=30.0)
 """
 
 
@@ -1990,7 +2064,8 @@ def main():
                             "analyze_image", "detect_sources", "compare_images",
                             "convert_to_png",
                             "query_memory", "list_findings", "list_unexplored", "my_stats",
-                            "dismiss_lead", "add_note", "mark_exhausted"}  # Image + memory tools can always be re-called
+                            "dismiss_lead", "add_note", "mark_exhausted",
+                            "query_gaia", "check_transients", "measure_photometry"}  # Image + memory + validation tools
     ztf_blacklist = set()         # {(ra, dec)} where ZTF timed out 2+ times
     ztf_fail_count = {}           # {(ra, dec): timeout_count}
     current_region = None         # (ra, dec) of current focus
@@ -2279,6 +2354,19 @@ def main():
             elif tool_name == "download_legacy":
                 n = result.get("n_images", 0)
                 cycle_summary_parts.append(f"download_legacy: {n} bands from Legacy Survey")
+            elif tool_name == "query_gaia":
+                n = result.get("n_sources", 0)
+                cycle_summary_parts.append(f"query_gaia: {n} Gaia sources")
+            elif tool_name == "check_transients":
+                n = result.get("n_matches", 0)
+                cycle_summary_parts.append(f"check_transients: {n} known transients")
+            elif tool_name == "measure_photometry":
+                mag = result.get("magnitude")
+                snr = result.get("snr")
+                if mag is not None:
+                    cycle_summary_parts.append(f"measure_photometry: mag={mag}, SNR={snr}")
+                else:
+                    cycle_summary_parts.append(f"measure_photometry: source not detected")
             elif tool_name == "log_finding":
                 fid = result.get("finding_id", "?")
                 cycle_summary_parts.append(f"Finding logged: {fid}")

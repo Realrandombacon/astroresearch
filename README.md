@@ -20,7 +20,7 @@ AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explo
 └─────────┬───────────────────────────┬───────────────┘
           │                           │
     ┌─────▼─────┐             ┌──────▼──────┐
-    │  Qwen 4B  │             │  22 tools   │
+    │  Qwen 4B  │             │  25 tools   │
     │  (Ollama) │             │  (Python)   │
     └───────────┘             └─────────────┘
 ```
@@ -28,9 +28,10 @@ AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explo
 1. The LLM picks a sky region or follows up on a previous finding
 2. It downloads **multi-epoch** data from Pan-STARRS warps and DESI Legacy Survey
 3. It compares **same-band, different-epoch** images to detect real temporal changes
-4. Cross-references with SIMBAD, ZTF, and MAST catalogs
-5. Interesting findings are logged with coordinates, magnitudes, and cross-references
-6. A persistent **memory system** tracks every region visited, preventing redundant work
+4. Cross-references with SIMBAD, ZTF, MAST, **Gaia DR3**, and **ALeRCE** catalogs
+5. Validates candidates with **aperture photometry** and known-transient checks before logging
+6. Interesting findings are logged with coordinates, magnitudes, and cross-references
+7. A persistent **memory system** tracks every region visited, preventing redundant work
 
 The agent runs continuously with no human input. It builds context across cycles, revisits promising regions, and self-corrects when errors occur.
 
@@ -127,6 +128,14 @@ autoresearch/
 | `compare_images` | Pixel-level comparison with cross-band guard and temporal detection |
 | `analyze_image` | Visual inspection — image is shown directly to the LLM |
 | `convert_to_png` | Convert FITS/JPEG to PNG for inspection |
+| `measure_photometry` | Calibrated aperture photometry — magnitude, flux, SNR at specific coordinates |
+
+### Validation (verify candidates before logging)
+
+| Tool | Description |
+|------|-------------|
+| `query_gaia` | Query Gaia DR3 for parallax, proper motion, and variability classification |
+| `check_transients` | Check ALeRCE/ZTF broker for known transients with ML classification |
 
 ### Knowledge management
 
@@ -147,8 +156,8 @@ The orchestrator uses a structured prompt that guides the LLM to:
 
 - **Plan** before acting (THOUGHT blocks)
 - **Use tools** by emitting `TOOL: function_name(params)` lines
-- **Follow the correct workflow**: download multi-epoch → compare same-band different-epoch → cross-check with Legacy Survey
-- **Avoid false positives**: cross-band comparisons (g vs r) are flagged as color anomalies, not transients
+- **Follow the correct workflow**: download multi-epoch → compare same-band different-epoch → cross-check with Legacy Survey → validate with Gaia/ALeRCE → measure photometry
+- **Avoid false positives**: cross-band comparisons (g vs r) are flagged as color anomalies, not transients; Gaia checks filter known variables; ALeRCE checks filter already-reported transients
 - **Manage its own memory**: dismiss resolved leads, add notes, mark regions exhausted
 - **Self-correct** when files are missing or queries fail
 

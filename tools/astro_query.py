@@ -1,6 +1,6 @@
 """
 Astronomical archive query tools.
-Searches MAST (JWST, Hubble), ZTF, and SIMBAD for observations.
+Searches MAST (JWST, Hubble), ZTF, SIMBAD, Gaia, and ALeRCE for observations.
 
 Usage:
     python tools/astro_query.py search-region --ra 150.0 --dec 2.0 --radius 0.1
@@ -8,6 +8,8 @@ Usage:
     python tools/astro_query.py multi-epoch --ra 150.0 --dec 2.0 --radius 0.05
     python tools/astro_query.py ztf-lightcurve --ra 150.0 --dec 2.0 --radius 5
     python tools/astro_query.py simbad-check --ra 150.0 --dec 2.0 --radius 10
+    python tools/astro_query.py query-gaia --ra 83.633 --dec 22.015 --radius 10
+    python tools/astro_query.py check-transients --ra 150.0 --dec 30.0 --radius 5
 
 All outputs go to stdout as JSON for the orchestrator to parse.
 """
@@ -888,6 +890,255 @@ def download_legacy(ra, dec, bands='grz', size_pix=256):
     }
 
 
+def query_gaia(ra, dec, radius_arcsec=5):
+    """Query Gaia DR3 catalog for sources at a position.
+
+    Uses ESA's TAP sync endpoint with ADQL cone search. Returns parallax,
+    proper motion, photometry, and variability classification for each source.
+
+    Args:
+        ra: Right Ascension in degrees
+        dec: Declination in degrees
+        radius_arcsec: Search radius in arcseconds (default 5)
+
+    Returns:
+        dict with Gaia sources and their properties.
+    """
+    radius_deg = float(radius_arcsec) / 3600.0
+
+    adql = f"""SELECT TOP 50
+    g.source_id, g.ra, g.dec,
+    g.parallax, g.parallax_error,
+    g.pmra, g.pmdec,
+    g.phot_g_mean_mag, g.bp_rp, g.ruwe,
+    g.radial_velocity,
+    v.num_selected_g_fov, v.range_mag_g_fov,
+    c.best_class_name, c.best_class_score
+FROM gaiadr3.gaia_source AS g
+LEFT OUTER JOIN gaiadr3.vari_summary AS v
+    ON g.source_id = v.source_id
+LEFT OUTER JOIN gaiadr3.vari_classifier_result AS c
+    ON g.source_id = c.source_id
+WHERE CONTAINS(
+    POINT('ICRS', g.ra, g.dec),
+    CIRCLE('ICRS', {ra}, {dec}, {radius_deg})
+) = 1
+ORDER BY g.phot_g_mean_mag ASC"""
+
+    tap_url = "https://gea.esac.esa.int/tap-server/tap/sync"
+    params = {
+        "REQUEST": "doQuery",
+        "LANG": "ADQL",
+        "FORMAT": "votable",
+        "QUERY": adql,
+    }
+
+    try:
+        resp = requests.get(tap_url, params=params, timeout=15)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        return {"error": "Gaia TAP query timed out (15s). Try a smaller radius."}
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Gaia TAP query failed: {e}"}
+
+    # Parse VOTable response
+    try:
+        from io import BytesIO
+        from astropy.io.votable import parse as parse_votable
+        import numpy as np
+
+        vot = parse_votable(BytesIO(resp.content))
+        table = vot.get_first_table()
+        data = table.array
+
+        if len(data) == 0:
+            return {
+                "source": "Gaia DR3",
+                "query": {"ra": ra, "dec": dec, "radius_arcsec": radius_arcsec},
+                "n_sources": 0,
+                "sources": [],
+                "note": "No Gaia sources within search radius.",
+            }
+
+        sources = []
+        for row in data:
+            # Calculate angular separation
+            dra = (float(row["ra"]) - ra) * np.cos(np.radians(dec))
+            ddec = float(row["dec"]) - dec
+            sep_arcsec = round(np.sqrt(dra**2 + ddec**2) * 3600, 2)
+
+            # Handle masked/null values
+            def _val(x, ndigits=4):
+                try:
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        v = float(x)
+                    if np.isnan(v) or np.isinf(v):
+                        return None
+                    return round(v, ndigits)
+                except (ValueError, TypeError):
+                    return None
+
+            def _str(x):
+                try:
+                    s = str(x).strip()
+                    return s if s and s != "--" and s != "" else None
+                except Exception:
+                    return None
+
+            # Total proper motion
+            pmra_val = _val(row["pmra"], 2)
+            pmdec_val = _val(row["pmdec"], 2)
+            pm_total = None
+            if pmra_val is not None and pmdec_val is not None:
+                pm_total = round(np.sqrt(pmra_val**2 + pmdec_val**2), 2)
+
+            sources.append({
+                "source_id": str(row["source_id"]),
+                "ra": _val(row["ra"], 6),
+                "dec": _val(row["dec"], 6),
+                "parallax_mas": _val(row["parallax"], 3),
+                "parallax_error": _val(row["parallax_error"], 3),
+                "pmra": pmra_val,
+                "pmdec": pmdec_val,
+                "pm_total_mas_yr": pm_total,
+                "phot_g_mean_mag": _val(row["phot_g_mean_mag"], 3),
+                "bp_rp": _val(row["bp_rp"], 3),
+                "ruwe": _val(row["ruwe"], 2),
+                "radial_velocity": _val(row["radial_velocity"], 1),
+                "variable_class": _str(row["best_class_name"]),
+                "variable_score": _val(row["best_class_score"], 3),
+                "n_var_observations": _val(row["num_selected_g_fov"], 0),
+                "var_range_mag": _val(row["range_mag_g_fov"], 3),
+                "distance_arcsec": sep_arcsec,
+            })
+
+        # Sort by distance
+        sources.sort(key=lambda s: s["distance_arcsec"])
+
+        return {
+            "source": "Gaia DR3",
+            "query": {"ra": ra, "dec": dec, "radius_arcsec": radius_arcsec},
+            "n_sources": len(sources),
+            "sources": sources,
+            "note": (
+                "High proper motion (pm_total > 50 mas/yr) = nearby moving star (not a transient). "
+                "variable_class set = known variable star. "
+                "parallax > 5 mas = within ~200 pc (likely stellar, not extragalactic transient)."
+            ),
+        }
+
+    except Exception as e:
+        return {"error": f"Failed to parse Gaia VOTable response: {e}"}
+
+
+def check_transients(ra, dec, radius_arcsec=5):
+    """Check ALeRCE/ZTF broker for known transients at a position.
+
+    ALeRCE aggregates ZTF and ATLAS alerts with ML classification.
+    No authentication required.
+
+    Args:
+        ra: Right Ascension in degrees
+        dec: Declination in degrees
+        radius_arcsec: Search radius in arcseconds (default 5)
+
+    Returns:
+        dict with known transient objects and their classifications.
+    """
+    base_url = "https://api.alerce.online/ztf/v1/objects"
+    params = {
+        "ra": float(ra),
+        "dec": float(dec),
+        "radius": float(radius_arcsec),
+        "page_size": 10,
+        "count": "false",
+    }
+
+    try:
+        resp = requests.get(base_url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.Timeout:
+        return {"error": "ALeRCE API timed out (15s). Try again later."}
+    except requests.exceptions.RequestException as e:
+        return {"error": f"ALeRCE API request failed: {e}"}
+    except (ValueError, KeyError) as e:
+        return {"error": f"ALeRCE API returned unexpected response: {e}"}
+
+    items = data.get("items", [])
+    if not items:
+        return {
+            "source": "ALeRCE (ZTF broker)",
+            "query": {"ra": ra, "dec": dec, "radius_arcsec": radius_arcsec},
+            "n_matches": 0,
+            "objects": [],
+            "note": "No known ZTF transients at this position — candidate may be novel!",
+        }
+
+    import numpy as np
+
+    objects = []
+    for obj in items:
+        oid = obj.get("oid", "")
+
+        # Fetch classification for this object
+        class_name = None
+        class_prob = None
+        try:
+            cls_url = f"https://api.alerce.online/ztf/v1/objects/{oid}/classifiers"
+            cls_resp = requests.get(cls_url, timeout=10)
+            if cls_resp.status_code == 200:
+                cls_data = cls_resp.json()
+                # Find the latest/best classifier
+                for classifier_name, classes in cls_data.items():
+                    if classes:
+                        # Pick highest probability class
+                        best = max(classes, key=lambda c: c.get("probability", 0))
+                        class_name = best.get("class_name")
+                        class_prob = round(best.get("probability", 0), 3)
+                        break
+        except Exception:
+            pass  # Classification is optional
+
+        # Angular separation
+        obj_ra = obj.get("meanra", obj.get("ra"))
+        obj_dec = obj.get("meandec", obj.get("dec"))
+        sep = None
+        if obj_ra is not None and obj_dec is not None:
+            dra = (float(obj_ra) - ra) * np.cos(np.radians(dec))
+            ddec = float(obj_dec) - dec
+            sep = round(np.sqrt(dra**2 + ddec**2) * 3600, 2)
+
+        objects.append({
+            "oid": oid,
+            "ra": round(float(obj_ra), 6) if obj_ra else None,
+            "dec": round(float(obj_dec), 6) if obj_dec else None,
+            "firstmjd": obj.get("firstmjd"),
+            "lastmjd": obj.get("lastmjd"),
+            "n_detections": obj.get("ndet"),
+            "class_name": class_name,
+            "class_probability": class_prob,
+            "distance_arcsec": sep,
+        })
+
+    # Sort by distance
+    objects.sort(key=lambda o: o.get("distance_arcsec") or 999)
+
+    return {
+        "source": "ALeRCE (ZTF broker)",
+        "query": {"ra": ra, "dec": dec, "radius_arcsec": radius_arcsec},
+        "n_matches": len(objects),
+        "objects": objects,
+        "note": (
+            "Known ZTF transients at this position. "
+            "class_name indicates ML classification: SN (supernova), AGN, VS (variable star), "
+            "asteroid, bogus, etc. High class_probability = confident classification."
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Astronomical Archive Query Tools")
     sub = parser.add_subparsers(dest="command")
@@ -942,6 +1193,18 @@ def main():
     p_legacy.add_argument("--bands", type=str, default="grz", help="Bands to download (e.g., grz)")
     p_legacy.add_argument("--size", type=int, default=256, help="Size in pixels (max 512)")
 
+    # query-gaia
+    p_gaia = sub.add_parser("query-gaia", help="Query Gaia DR3 catalog")
+    p_gaia.add_argument("--ra", type=float, required=True)
+    p_gaia.add_argument("--dec", type=float, required=True)
+    p_gaia.add_argument("--radius", type=float, default=5.0, help="Radius in arcsec")
+
+    # check-transients
+    p_trans = sub.add_parser("check-transients", help="Check ALeRCE/ZTF for known transients")
+    p_trans.add_argument("--ra", type=float, required=True)
+    p_trans.add_argument("--dec", type=float, required=True)
+    p_trans.add_argument("--radius", type=float, default=5.0, help="Radius in arcsec")
+
     args = parser.parse_args()
     
     if args.command == "search-region":
@@ -960,6 +1223,10 @@ def main():
         result = download_multiepoch(args.ra, args.dec, args.filter, args.epochs, args.size)
     elif args.command == "download-legacy":
         result = download_legacy(args.ra, args.dec, args.bands, args.size)
+    elif args.command == "query-gaia":
+        result = query_gaia(args.ra, args.dec, args.radius)
+    elif args.command == "check-transients":
+        result = check_transients(args.ra, args.dec, args.radius)
     else:
         parser.print_help()
         return

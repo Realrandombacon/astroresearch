@@ -10,6 +10,7 @@ Usage:
     python tools/image_analysis.py list-images
     python tools/image_analysis.py to-png --image data/images/cutout.fits
     python tools/image_analysis.py analyze --image data/images/cutout.fits --prompt "Describe sources"
+    python tools/image_analysis.py measure-photometry --image data/images/warp.fits --ra 150.0 --dec 30.0
 """
 
 import os
@@ -532,6 +533,220 @@ def pixel_to_radec(x, y, header):
         return round(ra, 6), round(dec, 6)
 
 
+def radec_to_pixel(ra, dec, header):
+    """Convert RA/Dec to pixel coordinates using astropy WCS.
+
+    Inverse of pixel_to_radec(). Used for aperture photometry at specific
+    sky coordinates.
+
+    Args:
+        ra: Right Ascension in degrees
+        dec: Declination in degrees
+        header: FITS header (Header object or dict with WCS keywords)
+
+    Returns:
+        (x_pix, y_pix) as floats
+    """
+    try:
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        # If header is a dict, convert to FITS Header for WCS
+        if isinstance(header, dict):
+            hdr = fits.Header()
+            for k, v in header.items():
+                if k and not k.startswith('_'):
+                    try:
+                        hdr[k] = v
+                    except (ValueError, TypeError):
+                        pass
+            w = WCS(hdr)
+        else:
+            w = WCS(header)
+        coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+        px, py = w.world_to_pixel(coord)
+        return float(px), float(py)
+    except Exception:
+        # Fallback to manual linear WCS inversion
+        crpix1 = header.get("CRPIX1", 0)
+        crpix2 = header.get("CRPIX2", 0)
+        crval1 = header.get("CRVAL1", 0)
+        crval2 = header.get("CRVAL2", 0)
+        cd1_1 = header.get("CD1_1", header.get("CDELT1", 1e-10))
+        cd1_2 = header.get("CD1_2", 0)
+        cd2_1 = header.get("CD2_1", 0)
+        cd2_2 = header.get("CD2_2", header.get("CDELT2", 1e-10))
+
+        dra = ra - crval1
+        ddec = dec - crval2
+        # Invert the CD matrix: [dx, dy] = CD^-1 * [dra, ddec]
+        det = cd1_1 * cd2_2 - cd1_2 * cd2_1
+        if abs(det) < 1e-20:
+            raise ValueError("Singular WCS CD matrix — cannot invert")
+        dx = (cd2_2 * dra - cd1_2 * ddec) / det
+        dy = (-cd2_1 * dra + cd1_1 * ddec) / det
+
+        return float(crpix1 + dx), float(crpix2 + dy)
+
+
+def measure_photometry(image_path, ra, dec, aperture_radius=5,
+                       sky_inner=10, sky_outer=15):
+    """Measure calibrated aperture photometry of a source in a FITS image.
+
+    Performs circular aperture photometry with local sky background
+    subtraction using an annular region.
+
+    Args:
+        image_path: Path to FITS image
+        ra: Target RA in degrees
+        dec: Target Dec in degrees
+        aperture_radius: Aperture radius in pixels (default 5)
+        sky_inner: Inner radius of sky annulus in pixels (default 10)
+        sky_outer: Outer radius of sky annulus in pixels (default 15)
+
+    Returns:
+        dict with flux, magnitude, SNR, and measurement details.
+    """
+    # Load image — use raw FITS header for WCS (dict conversion loses keywords)
+    image_path = fuzzy_find_image(image_path)
+    if not os.path.exists(image_path):
+        return {"error": f"FITS file not found: {image_path}"}
+
+    try:
+        with fits.open(image_path) as hdul:
+            # Find first image HDU
+            raw_header = None
+            data = None
+            for hdu in hdul:
+                if hdu.data is not None and hdu.data.ndim >= 2:
+                    raw_header = hdu.header
+                    data = hdu.data.astype(np.float64)
+                    break
+            if data is None and hdul[0].data is not None:
+                raw_header = hdul[0].header
+                data = hdul[0].data.astype(np.float64)
+    except Exception as e:
+        return {"error": f"Failed to read FITS file: {e}"}
+
+    if data is None:
+        return {"error": "No image data in FITS file"}
+
+    # Replace NaN with 0 for photometry (NaN pixels will be excluded by sky annulus)
+    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Build dict header for metadata access
+    header = dict(raw_header)
+
+    # Convert RA/Dec to pixel coordinates using raw FITS header
+    try:
+        cx, cy = radec_to_pixel(ra, dec, raw_header)
+    except Exception as e:
+        return {"error": f"WCS conversion failed: {e}. Check that the image has valid WCS headers."}
+
+    ny, nx = data.shape
+    cx_int, cy_int = int(round(cx)), int(round(cy))
+
+    # Check if target is within image bounds (with margin for sky annulus)
+    margin = sky_outer + 2
+    if cx_int < margin or cx_int >= nx - margin or cy_int < margin or cy_int >= ny - margin:
+        return {
+            "error": f"Target position (pixel {cx_int},{cy_int}) is too close to edge "
+                     f"or outside image ({nx}x{ny}). The sky annulus (r={sky_outer}px) "
+                     f"would extend beyond the image boundary.",
+            "pixel_x": round(cx, 1),
+            "pixel_y": round(cy, 1),
+            "image_size": f"{nx}x{ny}",
+        }
+
+    # Build distance grid centered on target
+    y_grid, x_grid = np.ogrid[:ny, :nx]
+    dist = np.sqrt((x_grid - cx) ** 2 + (y_grid - cy) ** 2)
+
+    # Aperture mask
+    aperture_mask = dist <= aperture_radius
+    n_aperture = int(np.count_nonzero(aperture_mask))
+
+    # Sky annulus mask
+    sky_mask = (dist >= sky_inner) & (dist <= sky_outer)
+    n_sky = int(np.count_nonzero(sky_mask))
+
+    if n_aperture == 0:
+        return {"error": "Aperture contains no pixels — increase aperture_radius"}
+    if n_sky < 10:
+        return {"error": f"Sky annulus has only {n_sky} pixels — increase sky_outer or decrease sky_inner"}
+
+    # Measure fluxes
+    aperture_sum = float(np.sum(data[aperture_mask]))
+    sky_pixels = data[sky_mask]
+    sky_median = float(np.median(sky_pixels))
+    sky_std = float(np.std(sky_pixels))
+
+    # Background-subtracted flux
+    net_flux = aperture_sum - sky_median * n_aperture
+
+    # Get zero point and exposure time from header
+    # Pan-STARRS warps use HIERARCH FPA.ZP; stacked images may differ
+    zp = None
+    for key in ("FPA.ZP", "HIERARCH FPA.ZP", "ZP", "MAGZPT", "PHOTZP"):
+        if key in header:
+            try:
+                zp = float(header[key])
+                break
+            except (ValueError, TypeError):
+                pass
+    if zp is None:
+        zp = 25.0  # Default instrumental zero point
+
+    exptime = float(header.get("EXPTIME", header.get("EXPOSURE", 1.0)))
+    if exptime <= 0:
+        exptime = 1.0
+
+    # Calculate magnitude and SNR
+    magnitude = None
+    mag_error = None
+    snr = None
+
+    if net_flux > 0:
+        magnitude = round(-2.5 * np.log10(net_flux / exptime) + zp, 3)
+        # SNR: signal / noise where noise = sqrt(signal + n_pix * sky_variance)
+        noise_sq = net_flux + n_aperture * sky_std ** 2
+        if noise_sq > 0:
+            snr = round(net_flux / np.sqrt(noise_sq), 1)
+            if snr > 0:
+                mag_error = round(1.0857 / snr, 3)  # Pogson formula
+    else:
+        snr = 0.0
+
+    return {
+        "image": image_path,
+        "target_ra": ra,
+        "target_dec": dec,
+        "pixel_x": round(cx, 2),
+        "pixel_y": round(cy, 2),
+        "aperture_radius_px": aperture_radius,
+        "sky_annulus": f"{sky_inner}-{sky_outer} px",
+        "raw_flux": round(aperture_sum, 2),
+        "sky_median": round(sky_median, 4),
+        "sky_std": round(sky_std, 4),
+        "net_flux": round(net_flux, 2),
+        "magnitude": magnitude,
+        "mag_error": mag_error,
+        "snr": snr,
+        "n_aperture_pixels": n_aperture,
+        "n_sky_pixels": n_sky,
+        "zero_point": zp,
+        "exptime": exptime,
+        "note": (
+            "Instrumental magnitude using circular aperture photometry. "
+            "Compare same-band measurements across epochs to detect variability. "
+            "Magnitude error from Poisson statistics (1.0857/SNR)."
+        ) if magnitude is not None else (
+            "Source not detected — net flux is negative (below sky background). "
+            "Try a larger aperture or verify target coordinates."
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -566,6 +781,15 @@ def main():
     p_analyze.add_argument("--image", required=True, help="Path to FITS image")
     p_analyze.add_argument("--prompt", default=None, help="Custom analysis prompt")
     p_analyze.add_argument("--model", default="qwen3.5:4b", help="Ollama model name")
+
+    # measure-photometry
+    p_phot = sub.add_parser("measure-photometry", help="Aperture photometry at RA/Dec")
+    p_phot.add_argument("--image", required=True, help="Path to FITS image")
+    p_phot.add_argument("--ra", type=float, required=True, help="Target RA in degrees")
+    p_phot.add_argument("--dec", type=float, required=True, help="Target Dec in degrees")
+    p_phot.add_argument("--aperture", type=int, default=5, help="Aperture radius in pixels")
+    p_phot.add_argument("--inner", type=int, default=10, help="Sky annulus inner radius")
+    p_phot.add_argument("--outer", type=int, default=15, help="Sky annulus outer radius")
 
     args = parser.parse_args()
 
@@ -844,6 +1068,15 @@ def main():
             args.image,
             prompt=args.prompt,
             model=args.model,
+        )
+        print(json.dumps(result, indent=2))
+
+    elif args.command == "measure-photometry":
+        result = measure_photometry(
+            args.image, args.ra, args.dec,
+            aperture_radius=args.aperture,
+            sky_inner=args.inner,
+            sky_outer=args.outer,
         )
         print(json.dumps(result, indent=2))
 
