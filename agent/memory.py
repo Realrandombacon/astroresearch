@@ -509,9 +509,10 @@ def list_unexplored(memory, **kwargs):
         best = 999
         cos_dec = math.cos(math.radians(dec))
         for era, edec in explored_coords:
-            dra = abs(ra - era) * cos_dec
-            if dra > 180 * cos_dec:
-                dra = 360 * cos_dec - dra
+            dra = abs(ra - era)
+            if dra > 180:
+                dra = 360 - dra  # RA wrap-around fix
+            dra *= cos_dec     # project onto sky after wrap correction
             ddec = abs(dec - edec)
             dist = math.sqrt(dra ** 2 + ddec ** 2)
             if dist < best:
@@ -535,7 +536,7 @@ def list_unexplored(memory, **kwargs):
         })
 
     n_explored = len(regions)
-    sky_area_explored = n_explored * 0.0003
+    sky_area_explored = n_explored * 0.0011  # ~2 arcmin cutout ≈ 0.0011 sq deg
     sky_fraction = sky_area_explored / 41253 * 100
 
     return {
