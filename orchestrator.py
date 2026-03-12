@@ -244,7 +244,7 @@ from agent.ui import C, TOOL_STYLE, _tool_color, log, print_banner, print_cycle_
 # Ollama API
 # ---------------------------------------------------------------------------
 
-def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, images=None):
+def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, top_p=0.9, images=None):
     """Call Ollama with think:false for direct structured output.
 
     If images is provided (list of base64 strings), they are included in
@@ -265,6 +265,7 @@ def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, images=
         "think": False,
         "options": {
             "temperature": temperature,
+            "top_p": top_p,
             "num_predict": 4000,
             "num_ctx": 16000,
         },
@@ -1130,7 +1131,8 @@ def main():
     parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model (default: qwen3.5:4b)")
     parser.add_argument("--max-cycles", type=int, default=0, help="Max research cycles (0=infinite)")
     parser.add_argument("--target", type=str, default=None, help="Initial target to investigate")
-    parser.add_argument("--temperature", type=float, default=0.3, help="LLM temperature")
+    parser.add_argument("--temperature", type=float, default=0.1, help="LLM temperature")
+    parser.add_argument("--top-p", type=float, default=0.85, help="Nucleus sampling threshold (0.0-1.0)")
     parser.add_argument("--dry-run", action="store_true", help="Show prompts without calling Ollama")
     args = parser.parse_args()
     
@@ -1208,7 +1210,7 @@ def main():
         _write_dashboard_status(running=True, cycle=cycle_num, phase="thinking", current_tool=None)
         images_for_this_call = pending_images if pending_images else None
         pending_images = []  # Clear after use
-        response, elapsed = call_ollama(args.model, system_prompt, user_prompt, args.temperature, images=images_for_this_call)
+        response, elapsed = call_ollama(args.model, system_prompt, user_prompt, args.temperature, args.top_p, images=images_for_this_call)
 
         if response is None:
             log("WARN", "No response from Qwen. Retrying in 15s...")
@@ -1480,7 +1482,7 @@ def main():
 
             reflect_response, reflect_elapsed = call_ollama(
                 args.model, system_prompt, reflection_prompt,
-                args.temperature, images=images_for_reflect,
+                args.temperature, args.top_p, images=images_for_reflect,
             )
 
             if reflect_response is None:
