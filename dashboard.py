@@ -57,12 +57,31 @@ def read_memory():
 
 def read_findings():
     """Read findings.tsv and return as list of dicts."""
+    EXPECTED_FIELDS = ["id", "timestamp", "ra", "dec", "significance", "description"]
     findings = []
     try:
         with open(FINDINGS_FILE, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f, delimiter="\t")
+            # Skip blank lines at start
+            lines = [l for l in f if l.strip()]
+            if not lines:
+                return findings
+            # Check if first line is a header
+            first = lines[0].strip().split("\t")
+            if first[0].lower() in ("id", "finding_id"):
+                # Has header — use DictReader
+                import io
+                reader = csv.DictReader(io.StringIO("".join(lines)), delimiter="\t")
+            else:
+                # No header — assign field names manually
+                import io
+                reader = csv.DictReader(
+                    io.StringIO("".join(lines)), delimiter="\t",
+                    fieldnames=EXPECTED_FIELDS
+                )
             for row in reader:
-                findings.append(row)
+                # Skip rows with missing essential fields
+                if row.get("timestamp") and row.get("ra"):
+                    findings.append(row)
     except Exception:
         pass
     return findings

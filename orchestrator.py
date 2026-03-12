@@ -1929,9 +1929,18 @@ def log_finding(ra=0, dec=0, description="", significance="medium", **kwargs):
 
     finding_path = os.path.join(FINDINGS_DIR, f"{finding_id}.json")
 
-    # Append to findings.tsv
-    if not os.path.exists(FINDINGS_FILE):
-        with open(FINDINGS_FILE, "w") as f:
+    # Append to findings.tsv (ensure header exists)
+    needs_header = not os.path.exists(FINDINGS_FILE)
+    if not needs_header:
+        try:
+            with open(FINDINGS_FILE, "r", encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if not first_line or not first_line.startswith("id"):
+                    needs_header = True
+        except Exception:
+            needs_header = True
+    if needs_header:
+        with open(FINDINGS_FILE, "w", encoding="utf-8") as f:
             f.write("id\ttimestamp\tra\tdec\tsignificance\tdescription\n")
 
     with open(FINDINGS_FILE, "a", encoding="utf-8") as f:
