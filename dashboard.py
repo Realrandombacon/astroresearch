@@ -306,6 +306,33 @@ def api_coverage_grid():
     })
 
 
+@app.route("/api/recent-images")
+def api_recent_images():
+    """Return the 5 most recently modified PNGs (by mtime)."""
+    png_dir = os.path.join(DATA_DIR, "png")
+    if not os.path.isdir(png_dir):
+        return jsonify({"images": []})
+    files = []
+    for f in os.listdir(png_dir):
+        if f.lower().endswith(".png"):
+            full = os.path.join(png_dir, f)
+            sz = os.path.getsize(full)
+            if sz > 500:  # skip tiny placeholder files
+                files.append((f, os.path.getmtime(full)))
+    files.sort(key=lambda x: x[1], reverse=True)
+    return jsonify({"images": [f[0] for f in files[:5]]})
+
+
+@app.route("/png/<path:filename>")
+def serve_png(filename):
+    """Serve a PNG image from data/png/."""
+    png_dir = os.path.join(DATA_DIR, "png")
+    fpath = os.path.join(png_dir, filename)
+    if not os.path.isfile(fpath):
+        return "Not found", 404
+    return Response(open(fpath, "rb").read(), mimetype="image/png")
+
+
 # ---------------------------------------------------------------------------
 # Main HTML Page
 # ---------------------------------------------------------------------------
