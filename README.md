@@ -80,10 +80,12 @@ python orchestrator.py --max-cycles 50
 
 ```bash
 python dashboard.py
-# Open http://localhost:5000 in your browser
+# Open http://localhost:5555 in your browser
 ```
 
 The dashboard shows sky coverage maps, finding statistics, tool usage breakdown, and real-time agent status.
+
+![Dashboard](docs/dashboard.png)
 
 ## Project structure
 

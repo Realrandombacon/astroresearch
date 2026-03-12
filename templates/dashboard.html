@@ -1287,7 +1287,10 @@ async function manualRefresh() {
 }
 
 // Initial load
-refreshAll();
+refreshAll().then(() => {
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.has('scroll')) window.scrollTo(0, parseInt(sp.get('scroll')) || 0);
+});
 
 // Periodic refresh
 setInterval(refreshAll, REFRESH_INTERVAL);
