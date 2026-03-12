@@ -702,62 +702,54 @@ async function updateSkyMap() {
     }
     if (!dataChanged('skymap', regions)) return;
 
-    document.getElementById('map-badge').textContent = `${regions.length} regions`;
+    const nExhausted = regions.filter(r => r.exhausted).length;
+    const nActive = regions.filter(r => !r.exhausted).length;
+    const nWithFindings = regions.filter(r => r.n_findings > 0).length;
+    document.getElementById('map-badge').textContent = `${regions.length} regions · ${nExhausted} exhausted · ${nWithFindings} with findings`;
 
-    const ra = regions.map(r => r.ra);
-    const dec = regions.map(r => r.dec);
-    const visits = regions.map(r => r.visits);
-    const nFindings = regions.map(r => r.n_findings);
-    const sizes = regions.map(r => Math.max(6, Math.min(22, r.visits * 3 + r.n_findings * 6)));
-    const colors = regions.map(r => r.n_findings > 0 ? r.visits : r.visits);
-    const hoverText = regions.map(r =>
+    const makeHover = r =>
         `<b>RA ${r.ra.toFixed(2)}, Dec ${r.dec.toFixed(2)}</b><br>` +
+        `Status: ${r.exhausted ? 'EXHAUSTED' : 'Active'}<br>` +
         `Visits: ${r.visits}<br>` +
-        `Tools: ${r.tools_used.join(', ')}<br>` +
-        `Findings: ${r.n_findings}<br>` +
-        `Last outcome: ${r.outcomes.length > 0 ? r.outcomes[r.outcomes.length-1] : 'none'}`
-    );
+        `Tools: ${r.n_tools}<br>` +
+        `Findings: ${r.n_findings}`;
 
-    // Main scatter: explored regions
-    const traceRegions = {
-        x: ra, y: dec,
-        mode: 'markers',
-        type: 'scatter',
-        name: 'Explored',
+    // Active regions (cyan)
+    const active = regions.filter(r => !r.exhausted && r.n_findings === 0);
+    const traceActive = {
+        x: active.map(r => r.ra), y: active.map(r => r.dec),
+        mode: 'markers', type: 'scatter', name: `Active (${active.length})`,
         marker: {
-            size: sizes,
-            color: visits,
-            colorscale: [[0,'#1a365d'],[0.3,'#0ea5e9'],[0.6,'#8b5cf6'],[1,'#ec4899']],
-            showscale: true,
-            colorbar: {
-                title: { text: 'Visits', font: PLOTLY_FONT },
-                tickfont: PLOTLY_FONT,
-                bordercolor: PLOTLY_GRID,
-                len: 0.6,
-                thickness: 12,
-            },
+            size: active.map(r => Math.max(6, Math.min(18, r.visits * 3))),
+            color: '#0ea5e9', opacity: 0.85,
             line: { color: 'rgba(0,212,255,0.4)', width: 1 },
-            opacity: 0.85,
         },
-        text: hoverText,
-        hoverinfo: 'text',
+        text: active.map(makeHover), hoverinfo: 'text',
     };
 
-    // Findings overlay
-    const findingsRegions = regions.filter(r => r.n_findings > 0);
-    const traceFindings = {
-        x: findingsRegions.map(r => r.ra),
-        y: findingsRegions.map(r => r.dec),
-        mode: 'markers',
-        type: 'scatter',
-        name: 'Has Findings',
+    // Exhausted regions (dim gray)
+    const exhausted = regions.filter(r => r.exhausted && r.n_findings === 0);
+    const traceExhausted = {
+        x: exhausted.map(r => r.ra), y: exhausted.map(r => r.dec),
+        mode: 'markers', type: 'scatter', name: `Exhausted (${exhausted.length})`,
         marker: {
-            size: findingsRegions.map(r => 10 + r.n_findings * 5),
-            color: 'rgba(234,179,8,0)',
-            line: { color: '#eab308', width: 2 },
-            symbol: 'diamond-open',
+            size: 5, color: '#3a4570', opacity: 0.5,
+            symbol: 'x', line: { color: '#2a3050', width: 1 },
         },
-        hoverinfo: 'skip',
+        text: exhausted.map(makeHover), hoverinfo: 'text',
+    };
+
+    // Regions with findings (gold stars)
+    const withFindings = regions.filter(r => r.n_findings > 0);
+    const traceFindings = {
+        x: withFindings.map(r => r.ra), y: withFindings.map(r => r.dec),
+        mode: 'markers', type: 'scatter', name: `Findings (${withFindings.length})`,
+        marker: {
+            size: withFindings.map(r => 10 + r.n_findings * 4),
+            color: '#eab308', opacity: 0.95,
+            symbol: 'star', line: { color: '#fbbf24', width: 1 },
+        },
+        text: withFindings.map(makeHover), hoverinfo: 'text',
     };
 
     const layout = {
@@ -791,7 +783,7 @@ async function updateSkyMap() {
         // Galactic plane removed — too expensive for periodic re-render
     };
 
-    Plotly.react('skymap', [traceRegions, traceFindings], layout, { responsive: true, displayModeBar: false, staticPlot: true });
+    Plotly.react('skymap', [traceExhausted, traceActive, traceFindings], layout, { responsive: true, displayModeBar: false, staticPlot: true });
 }
 
 

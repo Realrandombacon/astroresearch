@@ -160,6 +160,7 @@ def api_regions():
             "n_findings": len(reg.get("findings", [])),
             "findings": reg.get("findings", []),
             "last_cycle": reg.get("last_cycle", 0),
+            "exhausted": reg.get("exhausted", False),
         })
     return jsonify(regions)
 

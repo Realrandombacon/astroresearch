@@ -657,6 +657,66 @@ def my_stats(memory, **kwargs):
     }
 
 
+def search_memory(memory, keyword="", **kwargs):
+    """Search all regions by keyword across notes, outcomes, reasons, and tools.
+
+    Scans every region's notes, outcomes, exhaustion reasons, and tool lists
+    for a case-insensitive keyword match. Returns matching regions with context
+    so the agent can learn from past patterns.
+    """
+    keyword = str(keyword).strip().lower()
+    if not keyword or len(keyword) < 2:
+        return {"error": "Provide a keyword of at least 2 characters."}
+
+    matches = []
+    regions = memory.get("regions", {})
+
+    for key, reg in regions.items():
+        snippets = []
+
+        # Search notes
+        for note in reg.get("notes", []):
+            text = note.get("text", "")
+            if keyword in text.lower():
+                snippets.append(f"note: {text[:120]}")
+
+        # Search outcomes
+        for outcome in reg.get("outcomes", []):
+            if keyword in outcome.lower():
+                snippets.append(f"outcome: {outcome[:120]}")
+
+        # Search exhaustion reason
+        reason = reg.get("exhaustion_reason", "")
+        if keyword in reason.lower():
+            snippets.append(f"exhausted: {reason[:120]}")
+
+        # Search tools used
+        for tool in reg.get("tools_used", []):
+            if keyword in tool.lower():
+                snippets.append(f"tool: {tool}")
+
+        if snippets:
+            matches.append({
+                "ra": reg.get("ra", 0),
+                "dec": reg.get("dec", 0),
+                "visits": reg.get("visits", 1),
+                "exhausted": reg.get("exhausted", False),
+                "n_findings": len(reg.get("findings", [])),
+                "matches": snippets[:5],  # Cap per region
+            })
+
+    # Sort by number of matches (most relevant first)
+    matches.sort(key=lambda m: len(m["matches"]), reverse=True)
+
+    return {
+        "keyword": keyword,
+        "n_regions_matched": len(matches),
+        "results": matches[:15],  # Cap total to save tokens
+        "tip": f"Found {len(matches)} regions mentioning '{keyword}'."
+              if matches else f"No regions mention '{keyword}'. Try a different keyword.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Memory WRITE tools — Qwen manages its own knowledge base
 # ---------------------------------------------------------------------------

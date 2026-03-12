@@ -47,6 +47,7 @@ from agent.memory import (
     dismiss_lead as _dismiss_lead,
     add_note as _add_note,
     mark_exhausted as _mark_exhausted,
+    search_memory as _search_memory,
 )
 
 
@@ -200,6 +201,11 @@ AVAILABLE_TOOLS = {
     "my_stats": {
         "description": "See your own global performance dashboard: total findings by significance, regions explored vs exhausted, sky coverage, tool usage breakdown, top discoveries, and strategic recommendations. Call this periodically to reflect on your progress and adjust your strategy!",
         "usage": "my_stats()",
+        "script": "__internal__",
+    },
+    "search_memory": {
+        "description": "Search all explored regions by keyword. Scans notes, outcomes, exhaustion reasons, and tools for matches. Use this to learn from past patterns — e.g., search_memory(keyword='dwarf') to find all regions where you encountered dwarf stars.",
+        "usage": "search_memory(keyword='<search term>')",
         "script": "__internal__",
     },
     # --- Memory WRITE tools: Qwen manages its own knowledge base ---
@@ -643,6 +649,7 @@ _REQUIRED_PARAMS = {
     "dismiss_lead": ["ra", "dec"],
     "add_note": ["ra", "dec", "note"],
     "query_memory": ["ra", "dec"],
+    "search_memory": ["keyword"],
 }
 
 # Tools that take file path parameters
@@ -869,6 +876,10 @@ def execute_tool(tool_name, params, memory=None):
             if memory is None:
                 return {"error": "Memory not available"}
             return _my_stats(memory, **params)
+        if tool_name == "search_memory":
+            if memory is None:
+                return {"error": "Memory not available"}
+            return _search_memory(memory, **params)
         # Memory WRITE tools — Qwen manages its own knowledge
         if tool_name == "dismiss_lead":
             if memory is None:
@@ -1159,7 +1170,7 @@ def main():
                             "download_legacy", "list_images",
                             "analyze_image", "detect_sources", "compare_images",
                             "convert_to_png",
-                            "query_memory", "list_findings", "list_unexplored", "my_stats",
+                            "query_memory", "list_findings", "list_unexplored", "my_stats", "search_memory",
                             "dismiss_lead", "add_note", "mark_exhausted",
                             "query_gaia", "check_transients", "measure_photometry"}  # Image + memory + validation tools
     ztf_blacklist = set()         # {(ra, dec)} where ZTF timed out 2+ times

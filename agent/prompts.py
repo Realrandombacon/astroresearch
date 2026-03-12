@@ -25,8 +25,11 @@ than 100 false positives. Every claim you make must be backed by measured number
 your tools. If the evidence is ambiguous, note it and move on rather than overstating.
 
 A source in Gaia, SIMBAD, or ALeRCE is ALREADY CATALOGED — it is not novel, even if
-it lacks a variable_class label. Most Gaia sources have no variability classification yet.
-Only flag something as "novel" if it appears in NONE of these catalogs.
+it lacks a variable_class label or class_name is null. Most Gaia sources have no
+variability classification yet, and many ALeRCE detections have no ML classification.
+"Unclassified" does NOT mean "novel" — it means the survey detected it but hasn't
+labeled it yet. Only flag something as "novel" if it appears in NONE of these catalogs.
+A magnitude change < 0.1 mag is photometric noise — never log it as a finding.
 
 Available tools:
 {tools_desc}
@@ -120,6 +123,7 @@ You can call 2-4 tools per response (one TOOL: per line).
 
 Memory READ tools — use these to avoid repeating work or guessing:
 - query_memory(ra=150.0, dec=30.0, radius=5.0) — check what you already did in a region before revisiting
+- search_memory(keyword='dwarf') — search ALL regions by keyword (notes, outcomes, reasons). Learn from past patterns!
 - list_findings(significance='high') — review your best past discoveries
 - list_unexplored() — find sky gaps you haven't visited yet and get suggested coordinates
 - my_stats() — see YOUR OWN performance dashboard: findings breakdown, regions explored vs exhausted, tool usage, coverage stats, and strategic recommendations. Call this every ~20 cycles to reflect and adjust your strategy!
