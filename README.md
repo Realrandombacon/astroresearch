@@ -16,7 +16,7 @@ AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explo
 │                                                     │
 │   THOUGHT → TOOL call → result → THOUGHT → ...     │
 │                                                     │
-│   Anti-loop detection · Crash recovery · Memory     │
+│   Quality gates · Crash recovery · Memory            │
 └─────────┬───────────────────────────┬───────────────┘
           │                           │
     ┌─────▼─────┐             ┌──────▼──────┐
@@ -40,8 +40,9 @@ The agent runs continuously with no human input. It builds context across cycles
 - **Multi-epoch temporal analysis** — downloads individual Pan-STARRS warp exposures spanning years, enabling real transient and variability detection
 - **Cross-survey verification** — compares Pan-STARRS data against DESI Legacy Survey (independent survey, ~5yr baseline) to cross-check candidates
 - **Cross-band guard** — automatically warns when the agent tries to compare different photometric bands (g vs r), which reveals stellar colors not transients
+- **NaN edge artifact filter** — dilated NaN mask rejects false detections near Pan-STARRS tile boundaries in both source detection and epoch comparison
+- **Quality gates on findings** — rejects low-quality discoveries with explanatory feedback (SNR < 3, Δmag < 0.3, missing metadata, duplicates) so the agent learns and retries
 - **Persistent memory** — tracks every region explored, tools used, and outcomes across the entire session
-- **Anti-loop detection** — catches repeated visits (visit ceiling), alternating ping-pong patterns, and consecutive repetition
 - **Crash recovery** — automatic restart on failure with context preservation
 - **Live dashboard** — Flask web UI showing real-time progress, sky coverage, and findings
 
@@ -168,7 +169,9 @@ The orchestrator uses a structured prompt that guides the LLM to:
 - Multi-epoch images from Pan-STARRS via `ps1filenames.py?type=warp` (individual exposures, not stacks)
 - Cross-survey data from DESI Legacy Survey DR10 via `legacysurvey.org` API
 - Smart epoch selection: greedy max-spread algorithm picks maximally time-spread exposures
-- Anti-loop: visit ceiling (auto-exhausts after 15 visits), alternating pattern detector, consecutive repetition guard
+- WCS handling preserves raw FITS Header objects (not dicts) to support Pan-STARRS non-standard `PC001001` keywords
+- NaN boundary dilation (3–4px) filters interpolation artifacts at warp tile edges
+- Quality gates reject findings with SNR < 3, Δmag < 0.3, short descriptions, or duplicate coordinates
 - Fuzzy file matching handles coordinate precision mismatches across tool calls
 - Path normalization handles Windows/Linux differences
 - Aggressive timeouts (15–120s) prevent stalling on slow APIs
