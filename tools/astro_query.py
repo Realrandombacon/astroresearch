@@ -22,16 +22,13 @@ import re
 import requests
 from datetime import datetime
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+# Add project root to path so we can import shared modules
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-def save_result(subdir, filename, data):
-    """Save query result to data/<subdir>/<filename> for local persistence."""
-    out_dir = os.path.join(DATA_DIR, subdir)
-    os.makedirs(out_dir, exist_ok=True)
-    fpath = os.path.join(out_dir, filename)
-    with open(fpath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, default=str)
-    return fpath
+from config import DATA_DIR
+from tools.common import save_result, detect_file_format, timestamp_str
 
 # ---------------------------------------------------------------------------
 # MAST (Mikulski Archive for Space Telescopes) — JWST + Hubble
@@ -393,17 +390,7 @@ def simbad_check(ra, dec, radius_arcsec=10.0):
 # Image cutout download
 # ---------------------------------------------------------------------------
 
-def detect_file_format(data_bytes):
-    """Detect actual file format from magic bytes."""
-    if data_bytes[:2] == b'\xff\xd8':
-        return "jpeg"
-    if data_bytes[:6] in (b'SIMPLE', b'XTENS'):
-        return "fits"
-    if data_bytes[:8] == b'\x89PNG\r\n\x1a\n':
-        return "png"
-    if data_bytes[:3] == b'GIF':
-        return "gif"
-    return "unknown"
+# detect_file_format is imported from tools.common
 
 
 

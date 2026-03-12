@@ -37,10 +37,13 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from PIL import Image
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-IMAGES_DIR = os.path.join(DATA_DIR, "images")
-PNG_DIR = os.path.join(DATA_DIR, "png")
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# Add project root to path so we can import shared modules
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from config import DATA_DIR, IMAGES_DIR, PNG_DIR, OLLAMA_URL
+from tools.common import detect_file_format, dilate_mask, read_raster_image
 
 os.makedirs(PNG_DIR, exist_ok=True)
 
@@ -207,52 +210,22 @@ def read_image_data(filepath):
     with open(filepath, "rb") as f:
         magic = f.read(10)
 
-    if magic[:2] == b'\xff\xd8':
-        # JPEG
-        return _read_jpeg_data(filepath)
-    elif magic[:8] == b'\x89PNG\r\n\x1a\n':
-        # PNG
-        return _read_png_data(filepath)
-    elif magic[:6] in (b'SIMPLE', b'XTENS'):
-        # FITS
+    fmt = detect_file_format(magic)
+    if fmt == "jpeg" or fmt == "png":
+        return read_raster_image(filepath)
+    elif fmt == "fits":
         return read_fits_data(filepath)
     else:
         # Try Pillow as fallback
         try:
-            return _read_jpeg_data(filepath)
+            return read_raster_image(filepath)
         except Exception:
             raise ValueError(f"Unknown image format: {filepath} (magic: {magic[:8].hex()})")
 
 
-def _read_jpeg_data(filepath):
-    """Read JPEG/PNG image as numpy array using Pillow."""
-    img = Image.open(filepath)
-    # Convert to grayscale if color
-    if img.mode != 'L':
-        img = img.convert('L')
-    data = np.array(img, dtype=np.float64)
-    header = {
-        "NAXIS1": data.shape[1],
-        "NAXIS2": data.shape[0],
-        "FORMAT": "JPEG",
-        "BITPIX": 8,
-    }
-    return data, header
-
-
-def _read_png_data(filepath):
-    """Read PNG image as numpy array using Pillow."""
-    img = Image.open(filepath)
-    if img.mode != 'L':
-        img = img.convert('L')
-    data = np.array(img, dtype=np.float64)
-    header = {
-        "NAXIS1": data.shape[1],
-        "NAXIS2": data.shape[0],
-        "FORMAT": "PNG",
-        "BITPIX": 8,
-    }
-    return data, header
+# _read_jpeg_data and _read_png_data unified into read_raster_image (tools/common.py)
+_read_jpeg_data = read_raster_image
+_read_png_data = read_raster_image
 
 
 # ---------------------------------------------------------------------------
@@ -387,19 +360,7 @@ def detect_sources_simple(data, threshold_sigma=3.0, min_size=3, nan_mask=None):
     # have interpolation artifacts that mimic real sources.
     nan_boundary = None
     if nan_mask is not None and np.any(nan_mask):
-        NAN_DILATE = 4  # reject sources within 4px of any NaN
-        try:
-            from scipy.ndimage import binary_dilation
-            nan_boundary = binary_dilation(nan_mask, iterations=NAN_DILATE)
-        except ImportError:
-            nan_boundary = nan_mask.copy()
-            for _ in range(NAN_DILATE):
-                dilated = np.zeros_like(nan_boundary)
-                dilated[1:, :] |= nan_boundary[:-1, :]
-                dilated[:-1, :] |= nan_boundary[1:, :]
-                dilated[:, 1:] |= nan_boundary[:, :-1]
-                dilated[:, :-1] |= nan_boundary[:, 1:]
-                nan_boundary = dilated | nan_boundary
+        nan_boundary = dilate_mask(nan_mask, iterations=4)
 
     # Statistics (with sigma clipping for robust background)
     mean_val = np.mean(data)
@@ -1029,19 +990,7 @@ def main():
                 # Dilate by 3 pixels: NaN boundary halos cause interpolation
                 # artifacts that look like real sources. Expanding the mask
                 # by 3px catches these edge artifacts.
-                NAN_DILATE = 3
-                try:
-                    from scipy.ndimage import binary_dilation
-                    combined_bad = binary_dilation(combined_bad, iterations=NAN_DILATE)
-                except ImportError:
-                    # Manual dilation fallback if scipy not available
-                    for _ in range(NAN_DILATE):
-                        dilated = np.zeros_like(combined_bad)
-                        dilated[1:, :] |= combined_bad[:-1, :]
-                        dilated[:-1, :] |= combined_bad[1:, :]
-                        dilated[:, 1:] |= combined_bad[:, :-1]
-                        dilated[:, :-1] |= combined_bad[:, 1:]
-                        combined_bad = dilated | combined_bad
+                combined_bad = dilate_mask(combined_bad, iterations=3)
                 n_masked = int(np.count_nonzero(combined_bad))
                 if n_masked > 0:
                     data1[combined_bad] = 0.0
