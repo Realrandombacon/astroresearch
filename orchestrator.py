@@ -1692,6 +1692,224 @@ def _summarize_result(tool_name, result, max_len=300):
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Pre-execution validation — just-in-time reminders for Qwen
+# ---------------------------------------------------------------------------
+
+# Required parameters per tool (checked BEFORE spawning subprocess)
+_REQUIRED_PARAMS = {
+    "measure_photometry": ["image", "ra", "dec"],
+    "compare_images": ["img1", "img2"],
+    "detect_sources": ["image"],
+    "analyze_image": ["image"],
+    "download_cutout": ["ra", "dec"],
+    "download_multiepoch": ["ra", "dec"],
+    "download_legacy": ["ra", "dec"],
+    "search_region": ["ra", "dec"],
+    "simbad_check": ["ra", "dec"],
+    "query_gaia": ["ra", "dec"],
+    "check_transients": ["ra", "dec"],
+    "log_finding": ["ra", "dec", "description"],
+    "mark_exhausted": ["ra", "dec"],
+    "dismiss_lead": ["ra", "dec"],
+    "add_note": ["ra", "dec", "note"],
+    "query_memory": ["ra", "dec"],
+}
+
+# Tools that take file path parameters
+_FILE_PARAMS = {
+    "measure_photometry": ["image"],
+    "compare_images": ["img1", "img2"],
+    "detect_sources": ["image"],
+    "analyze_image": ["image"],
+}
+
+# Investigation tools that count toward mark_exhausted readiness
+_INVESTIGATION_TOOLS = {
+    "download_multiepoch", "compare_images", "measure_photometry",
+    "query_gaia", "simbad_check", "check_transients",
+}
+
+
+def _list_available_images():
+    """List real image files in data/images/ for filename suggestions."""
+    img_dir = os.path.join("data", "images")
+    if not os.path.isdir(img_dir):
+        return []
+    return [f for f in os.listdir(img_dir)
+            if f.endswith((".fits", ".jpg", ".jpeg", ".png"))]
+
+
+def _suggest_files(requested, available, limit=5):
+    """Find files similar to the requested name."""
+    if not available:
+        return []
+    req_lower = requested.lower()
+    # Extract RA/Dec/band fragments from requested name
+    scored = []
+    for f in available:
+        f_lower = f.lower()
+        score = 0
+        # Band match
+        for band in ["_g_", "_r_", "_i_", "_z_", "_y_"]:
+            if band in req_lower and band in f_lower:
+                score += 3
+        # RA fragment match (first 5 chars of coordinate)
+        import re
+        ra_match = re.search(r"(\d{2,3}\.\d{1,4})", req_lower)
+        if ra_match and ra_match.group(1)[:5] in f_lower:
+            score += 5
+        # Epoch match
+        for ep in ["_ep1", "_ep2", "_ep3", "_ep4", "_ep5"]:
+            if ep in req_lower and ep in f_lower:
+                score += 2
+        # Type match (warp vs cutout vs legacy)
+        for prefix in ["warp_", "cutout_", "legacy_"]:
+            if prefix in req_lower and prefix in f_lower:
+                score += 2
+        if score > 0:
+            scored.append((score, f))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [f for _, f in scored[:limit]]
+
+
+def _extract_band(filename):
+    """Extract photometric band letter from a filename."""
+    import re
+    m = re.search(r"_([grizy])_", filename.lower())
+    return m.group(1) if m else None
+
+
+def validate_tool_call(tool_name, params, memory=None):
+    """Pre-execution validation. Returns None if OK, or an error dict to skip execution.
+
+    This catches common Qwen mistakes BEFORE spawning a subprocess,
+    returning targeted guidance so Qwen self-corrects on the next turn.
+    """
+
+    # --- Rule 1: Missing required parameters ---
+    required = _REQUIRED_PARAMS.get(tool_name)
+    if required:
+        missing = [p for p in required if p not in params or params[p] is None or str(params[p]).strip() == ""]
+        if missing:
+            hints = {
+                "image": "Use a filename from your previous download results, or call list_images() first.",
+                "img1": "Use exact filenames from download_multiepoch results or list_images().",
+                "img2": "Use exact filenames from download_multiepoch results or list_images().",
+                "ra": "Provide the RA in decimal degrees (e.g., ra=186.5).",
+                "dec": "Provide the Dec in decimal degrees (e.g., dec=-8.5).",
+                "description": "Write a detailed description with magnitudes, SNR, MJD dates, and catalogs checked.",
+                "note": "Write what you observed or concluded about this region.",
+            }
+            hint_parts = [f"  - {p}: {hints.get(p, 'required')}" for p in missing]
+            return {
+                "error": "MISSING_PARAM",
+                "tool": tool_name,
+                "missing": missing,
+                "hint": f"{tool_name} requires these parameters:\n" + "\n".join(hint_parts),
+            }
+
+    # --- Rule 2: Cross-band guard for compare_images (check BEFORE file existence) ---
+    if tool_name == "compare_images":
+        img1 = str(params.get("img1", ""))
+        img2 = str(params.get("img2", ""))
+        band1 = _extract_band(img1)
+        band2 = _extract_band(img2)
+        if band1 and band2 and band1 != band2:
+            return {
+                "error": "CROSS_BAND_BLOCKED",
+                "img1_band": band1,
+                "img2_band": band2,
+                "hint": (
+                    f"BLOCKED: You are comparing {band1}-band vs {band2}-band. "
+                    f"Cross-band comparison shows stellar COLORS, not transients! "
+                    f"Compare SAME band, different epochs: e.g., warp_..._g_ep1 vs warp_..._g_ep3."
+                ),
+            }
+
+    # --- Rule 3: Filename validation (catch fabricated/placeholder names) ---
+    file_keys = _FILE_PARAMS.get(tool_name, [])
+    for key in file_keys:
+        filepath = params.get(key, "")
+        if not filepath:
+            continue
+        fname = os.path.basename(str(filepath))
+
+        # Check for placeholder patterns
+        if "XXXXX" in fname or "xxxxx" in fname:
+            available = _list_available_images()
+            suggestions = _suggest_files(fname, available)
+            return {
+                "error": "FABRICATED_FILENAME",
+                "requested": fname,
+                "hint": (
+                    f"The filename '{fname}' contains placeholder values (XXXXX). "
+                    f"Use EXACT filenames from your previous download results or call list_images()."
+                ),
+                "similar_files": suggestions if suggestions else "Call list_images() to see available files.",
+            }
+
+        # Check if file exists (only for .fits files we can verify)
+        if fname.endswith(".fits"):
+            full_path = os.path.join("data", "images", fname)
+            if not os.path.exists(full_path):
+                # Also try the path as given
+                if not os.path.exists(str(filepath)):
+                    available = _list_available_images()
+                    suggestions = _suggest_files(fname, available)
+                    return {
+                        "error": "FILE_NOT_FOUND",
+                        "requested": fname,
+                        "hint": (
+                            f"File '{fname}' does not exist in data/images/. "
+                            f"Use exact filenames from your previous download results."
+                        ),
+                        "similar_files": suggestions if suggestions else "Call list_images() to see available files.",
+                    }
+
+    # --- Rule 4: mark_exhausted checklist ---
+    if tool_name == "mark_exhausted" and memory:
+        ra = params.get("ra")
+        dec = params.get("dec")
+        if ra is not None and dec is not None:
+            try:
+                key = _region_key(ra, dec)
+            except (ValueError, TypeError):
+                return None  # let it fail naturally
+
+            reg = memory.get("regions", {}).get(key)
+            if reg:
+                # Already exhausted → existing warning handles it
+                if reg.get("exhausted"):
+                    return {
+                        "error": "ALREADY_EXHAUSTED",
+                        "hint": (
+                            f"STOP — region RA={ra}, Dec={dec} is ALREADY marked exhausted. "
+                            f"Do NOT call mark_exhausted again. Move to a new region: call list_unexplored()."
+                        ),
+                    }
+
+                # Check investigation completeness
+                tools_done = set(reg.get("tools_used", []))
+                tools_done_investigation = tools_done & _INVESTIGATION_TOOLS
+                tools_missing = _INVESTIGATION_TOOLS - tools_done
+                if len(tools_done_investigation) < 3:
+                    return {
+                        "error": "INCOMPLETE_INVESTIGATION",
+                        "hint": (
+                            f"Before marking exhausted, complete your investigation. "
+                            f"You used: {', '.join(sorted(tools_done_investigation)) or 'none of the key tools'}. "
+                            f"Still needed: {', '.join(sorted(tools_missing))}. "
+                            f"Run at least 3 of: download_multiepoch, compare_images, measure_photometry, "
+                            f"query_gaia, simbad_check, check_transients."
+                        ),
+                        "tools_used": sorted(tools_done_investigation),
+                        "tools_missing": sorted(tools_missing),
+                    }
+
+    return None  # All checks passed — proceed with execution
+
+
 def execute_tool(tool_name, params, memory=None):
     """Execute a tool by running the appropriate Python script."""
     if tool_name not in AVAILABLE_TOOLS:
@@ -2655,6 +2873,15 @@ def main():
                         continue
 
                 # (Image tools are exempt from cooldown — Qwen can re-analyze freely)
+
+                # --- Pre-execution validation (just-in-time reminders) ---
+                validation = validate_tool_call(tool_name, params, memory=memory)
+                if validation is not None:
+                    log("WARN", f"PRE-CHECK: {tool_name} blocked — {validation.get('error', '?')}")
+                    result = validation
+                    turn_results.append({"tool": tool_name, "params": params, "result": result})
+                    cycle_summary_parts.append(f"{tool_name}: BLOCKED ({validation.get('error', '?')})")
+                    continue
 
                 log("TOOL", f"{tool_name}|Calling {tool_name}({params})")
                 _write_dashboard_status(running=True, cycle=cycle_num, phase="tool", current_tool=tool_name)
