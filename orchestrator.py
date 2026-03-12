@@ -909,12 +909,12 @@ def execute_tool(tool_name, params, memory=None):
     if tool_name == "download_multiepoch":
         params.setdefault("filter", "g")
         params.setdefault("epochs", 3)
-        params.setdefault("size", 1.0)
+        params.setdefault("size", 2.0)
     elif tool_name == "download_legacy":
         params.setdefault("bands", "grz")
         params.setdefault("size", 256)
     elif tool_name == "download_cutout":
-        params.setdefault("size", 1.0)
+        params.setdefault("size", 2.0)
     elif tool_name == "query_gaia":
         params.setdefault("radius", 5)
     elif tool_name == "check_transients":
