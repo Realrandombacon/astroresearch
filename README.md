@@ -20,7 +20,7 @@ AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explo
 └─────────┬───────────────────────────┬───────────────┘
           │                           │
     ┌─────▼─────┐             ┌──────▼──────┐
-    │  Qwen 4B  │             │  25 tools   │
+    │  Qwen 4B  │             │  30 tools   │
     │  (Ollama) │             │  (Python)   │
     └───────────┘             └─────────────┘
 ```
@@ -28,10 +28,11 @@ AstroResearch uses **Qwen 3.5 (4B)** running on **Ollama** to autonomously explo
 1. The LLM picks a sky region or follows up on a previous finding
 2. It downloads **multi-epoch** data from Pan-STARRS warps and DESI Legacy Survey
 3. It compares **same-band, different-epoch** images to detect real temporal changes
-4. Cross-references with SIMBAD, ZTF, MAST, **Gaia DR3**, and **ALeRCE** catalogs
-5. Validates candidates with **aperture photometry** and known-transient checks before logging
-6. Interesting findings are logged with coordinates, magnitudes, and cross-references
-7. A persistent **memory system** tracks every region visited, preventing redundant work
+4. It can also download **radio survey data** (VLASS, FIRST, NVSS, LOFAR) and cross-check against pulsar/FRB catalogs
+5. Cross-references with SIMBAD, ZTF, MAST, **Gaia DR3**, and **ALeRCE** catalogs
+6. Validates candidates with **aperture photometry** and known-transient checks before logging
+7. Interesting findings are logged with coordinates, magnitudes, and cross-references
+8. A persistent **memory system** tracks every region visited, preventing redundant work
 
 The agent runs continuously with no human input. It builds context across cycles, revisits promising regions, and self-corrects when errors occur.
 
@@ -112,7 +113,9 @@ autoresearch/
 ├── dashboard.py             # Flask web dashboard for live monitoring
 ├── tools/
 │   ├── astro_query.py       # SIMBAD, ZTF, MAST, Pan-STARRS, Legacy Survey queries
-│   └── image_analysis.py    # FITS/image reading, comparison, source detection
+│   ├── image_analysis.py    # FITS/image reading, comparison, source detection
+│   ├── radio_query.py       # Radio survey downloads (VLASS, FIRST, NVSS, LOFAR), pulsar/FRB catalogs
+│   └── radio_analysis.py    # Radio FITS analysis, RFI detection
 ├── start_ollama.bat         # GPU launcher script (Windows)
 ├── start_ollama.ps1         # GPU launcher script (PowerShell)
 ├── findings/                # JSON files for each discovery (gitignored)
@@ -149,6 +152,16 @@ autoresearch/
 | `analyze_image` | Visual inspection — image is shown directly to the LLM |
 | `convert_to_png` | Convert FITS/JPEG to PNG for inspection |
 | `measure_photometry` | Calibrated aperture photometry — magnitude, flux, SNR at specific coordinates |
+
+### Radio astronomy
+
+| Tool | Description |
+|------|-------------|
+| `download_radio_spectrum` | Download radio survey cutouts (VLASS 3GHz, FIRST 1.4GHz, NVSS, LOFAR 150MHz) |
+| `analyze_spectrum` | Analyze radio FITS — peak flux, RMS noise, SNR, source detection |
+| `check_rfi` | Detect RFI contamination (stripe patterns, known interference bands, edge artifacts) |
+| `check_pulsar_catalog` | Cross-check against ATNF Pulsar Catalogue via VizieR |
+| `check_frb_catalog` | Cross-check against known FRBs (FRBCAT + CHIME catalog) |
 
 ### Validation (verify candidates before logging)
 
