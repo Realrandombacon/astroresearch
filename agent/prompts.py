@@ -271,10 +271,10 @@ def build_user_prompt(cycle_num, previous_results, research_history,
     if initial_target and cycle_num == 0:
         target_hint = f"\n## Starting Point\nBegin your research with: {initial_target}\n"
 
-    # --- Unused tool hints: nudge Qwen toward tools it hasn't tried yet ---
+    # --- Unused tool hints: nudge Qwen toward tools it hasn't tried THIS cycle ---
     unused_hint = ""
-    if session_tool_usage and cycle_num > 0 and cycle_num % 20 == 0:
-        # Tool groups: only hint about groups, not individual memory/internal tools
+    if session_tool_usage is not None and cycle_num > 0:
+        # Tools worth hinting about (not internal/memory tools)
         HINTABLE_TOOLS = {
             "download_radio_spectrum": "download radio survey data (VLASS/FIRST/NVSS/LOFAR) to analyze regions at radio wavelengths — a transient seen in both optical AND radio is extremely strong evidence",
             "analyze_spectrum": "analyze radio FITS images for flux, SNR, and radio source detection",
@@ -289,12 +289,10 @@ def build_user_prompt(cycle_num, previous_results, research_history,
         unused = {name: desc for name, desc in HINTABLE_TOOLS.items()
                   if name not in session_tool_usage}
         if unused:
-            # Pick up to 2 unused tools to hint about
-            hints = list(unused.items())[:2]
-            unused_hint = "\n## 💡 Did you know?\n"
-            for tool_name, desc in hints:
-                unused_hint += f"- You have access to **{tool_name}** — {desc}\n"
-            unused_hint += "Consider trying these tools to strengthen your investigations!\n"
+            # Rotate which tool we hint about (1 per cycle, round-robin)
+            unused_list = list(unused.items())
+            pick = unused_list[cycle_num % len(unused_list)]
+            unused_hint = f"\n💡 Did you know? You have access to **{pick[0]}** — {pick[1]}\n"
 
     return f"""Research Cycle {cycle_num}
 {target_hint}
