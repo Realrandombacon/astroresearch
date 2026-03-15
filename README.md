@@ -87,6 +87,23 @@ The dashboard shows sky coverage maps, finding statistics, tool usage breakdown,
 
 ![Dashboard](docs/dashboard.png)
 
+## Results — First 3-Day Run
+
+After ~72 hours of continuous autonomous operation, the agent completed **1500+ cycles** across **1900+ sky regions** (15 sq° sampled). Out of **114 findings** logged, **8 were manually validated** by cross-checking against SIMBAD (60"), Gaia DR3 (5"), and ALeRCE/ZTF — all confirmed as **genuinely uncatalogued variable sources**.
+
+### Top 6 Validated Discoveries
+
+| Rank | Finding | RA, Dec | Δmag | Band | SNR | Distance | Why it's interesting |
+|------|---------|---------|------|------|-----|----------|---------------------|
+| ⭐ | F190738 | 270.41, +0.02 | 0.92 | r | 648→518 | Not in Gaia | Highest SNR of entire project. Absent from ALL catalogues. |
+| 🔥 | F174748 | 94.97, -2.63 | 0.97 | g | — | ~4.5 kpc | Nearly 1 mag brightening. RUWE=1.008 (pristine). |
+| 3 | F014312 | 106.90, +49.63 | 0.70 | r | 224→524 | ~1.2 kpc | First validated find. Uncatalogued F/G variable star. |
+| 4 | F001930 | 304.53, +50.30 | 0.69 | g | 127→284 | ~2.4 kpc | SNR doubled between epochs. Clean astrometry. |
+| 5 | F173217 | 190.12, -6.65 | 0.68 | g | 29→81 | Not in Gaia | SNR tripled. Absent from all catalogues. Possibly extragalactic. |
+| 6 | F122946 | 0.91, -17.03 | 0.35 | r | 246→290 | Not in Gaia | Best photometry (errors < 0.005 mag). |
+
+All 6 sources show real brightness changes (Δmag > 0.3) over multi-year baselines, with zero matches in SIMBAD, no variability classification in Gaia, and no prior detections in ZTF/ALeRCE. Full cross-check details are in [`validated_by_claude.md`](validated_by_claude.md).
+
 ## Project structure
 
 ```
