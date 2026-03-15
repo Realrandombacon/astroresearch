@@ -84,6 +84,19 @@ VALIDATION WORKFLOW — BEFORE logging ANY finding with significance='high':
      Include these numbers in your log_finding description!
   4. Only log_finding with significance='high' if the candidate SURVIVES all checks
 
+### Radio astronomy workflow (when investigating radio sources):
+  1. download_radio_spectrum(ra=..., dec=..., survey='vlass') — get a radio survey cutout
+  2. check_rfi(image='data/images/radio_...fits') — ALWAYS check for RFI before analyzing!
+  3. analyze_spectrum(image='data/images/radio_...fits') — measure flux, SNR, detect radio sources
+  4. check_pulsar_catalog(ra=..., dec=..., radius=60) — is it a known pulsar?
+  5. check_frb_catalog(ra=..., dec=..., radius=60) — is it a known FRB?
+  6. If NOT in any catalog → measure_photometry on optical counterpart → log_finding
+
+  IMPORTANT: Radio RFI is extremely common. NEVER log a radio finding without running check_rfi first.
+  A radio source that IS in the pulsar/FRB catalog is NOT a discovery — dismiss it.
+  Available radio surveys: vlass (3GHz), first (1.4GHz, Dec>-10°), nvss (1.4GHz), lofar (150MHz).
+  You can combine optical + radio analysis: a transient seen in BOTH is very strong evidence!
+
 detect_sources is your most powerful tool — it gives you hard numbers:
   - Exact pixel positions and RA/Dec coordinates of every source
   - Peak flux and SNR for each source
@@ -212,7 +225,8 @@ Use THOUGHT: and TOOL: format as always.
 def build_user_prompt(cycle_num, previous_results, research_history,
                       initial_target=None, visited_regions=None,
                       current_region_cycles=0, ztf_blacklist=None,
-                      next_seed_target=None, memory_summary=None):
+                      next_seed_target=None, memory_summary=None,
+                      session_tool_usage=None):
     """Build the user prompt with context from previous cycles."""
 
     # Persistent memory (cross-run knowledge)
@@ -257,6 +271,31 @@ def build_user_prompt(cycle_num, previous_results, research_history,
     if initial_target and cycle_num == 0:
         target_hint = f"\n## Starting Point\nBegin your research with: {initial_target}\n"
 
+    # --- Unused tool hints: nudge Qwen toward tools it hasn't tried yet ---
+    unused_hint = ""
+    if session_tool_usage and cycle_num > 0 and cycle_num % 20 == 0:
+        # Tool groups: only hint about groups, not individual memory/internal tools
+        HINTABLE_TOOLS = {
+            "download_radio_spectrum": "download radio survey data (VLASS/FIRST/NVSS/LOFAR) to analyze regions at radio wavelengths — a transient seen in both optical AND radio is extremely strong evidence",
+            "analyze_spectrum": "analyze radio FITS images for flux, SNR, and radio source detection",
+            "check_rfi": "check radio observations for RFI contamination before trusting results",
+            "check_pulsar_catalog": "cross-check coordinates against the ATNF Pulsar Catalogue",
+            "check_frb_catalog": "cross-check coordinates against known Fast Radio Bursts (FRBCAT + CHIME)",
+            "download_legacy": "download DESI Legacy Survey cutouts for independent cross-survey verification",
+            "ztf_lightcurve": "retrieve ZTF light curves to check for known variability history",
+            "my_stats": "see your global performance dashboard with strategic recommendations",
+            "search_memory": "search all explored regions by keyword to learn from past patterns",
+        }
+        unused = {name: desc for name, desc in HINTABLE_TOOLS.items()
+                  if name not in session_tool_usage}
+        if unused:
+            # Pick up to 2 unused tools to hint about
+            hints = list(unused.items())[:2]
+            unused_hint = "\n## 💡 Did you know?\n"
+            for tool_name, desc in hints:
+                unused_hint += f"- You have access to **{tool_name}** — {desc}\n"
+            unused_hint += "Consider trying these tools to strengthen your investigations!\n"
+
     return f"""Research Cycle {cycle_num}
 {target_hint}
 {memory_text}
@@ -264,6 +303,6 @@ def build_user_prompt(cycle_num, previous_results, research_history,
 {explored_text}
 {ztf_text}
 {results_text}
-
+{unused_hint}
 What would you like to investigate next? Remember to use THOUGHT: and TOOL: format.
 """

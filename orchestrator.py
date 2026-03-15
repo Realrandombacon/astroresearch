@@ -224,6 +224,32 @@ AVAILABLE_TOOLS = {
         "usage": "mark_exhausted(ra=<degrees>, dec=<degrees>, reason='<summary of what was done>')",
         "script": "__internal__",
     },
+    # --- Radio astronomy tools ---
+    "download_radio_spectrum": {
+        "description": "Download radio survey cutout (VLASS, FIRST, NVSS, or LOFAR). Use for radio-wavelength analysis of a region. VLASS=3GHz, FIRST=1.4GHz, NVSS=1.4GHz, LOFAR=150MHz.",
+        "usage": "download_radio_spectrum(ra=<degrees>, dec=<degrees>, radius=5, survey='vlass')",
+        "script": "tools/radio_query.py download-radio --ra {ra} --dec {dec} --radius {radius} --survey {survey}",
+    },
+    "analyze_spectrum": {
+        "description": "Analyze a radio FITS image — measure peak flux (mJy), RMS noise, SNR, detect radio sources, and identify frequency band. Run check_rfi FIRST before trusting results!",
+        "usage": "analyze_spectrum(image='data/images/radio_<ra>_<dec>_<survey>.fits')",
+        "script": "tools/radio_analysis.py analyze-spectrum --image {image}",
+    },
+    "check_rfi": {
+        "description": "Check a radio observation for RFI (Radio Frequency Interference). ALWAYS run this before analyzing radio data! Checks for stripe patterns, known RFI frequency bands, and edge artifacts. Returns CLEAN, POSSIBLE_RFI, or LIKELY_RFI.",
+        "usage": "check_rfi(image='data/images/radio_<ra>_<dec>_<survey>.fits')",
+        "script": "tools/radio_analysis.py check-rfi --image {image}",
+    },
+    "check_pulsar_catalog": {
+        "description": "Cross-check coordinates against the ATNF Pulsar Catalogue (via VizieR). Returns known pulsars with period, DM, distance, and flux. A match means the source is a KNOWN pulsar — not novel.",
+        "usage": "check_pulsar_catalog(ra=<degrees>, dec=<degrees>, radius=60)",
+        "script": "tools/radio_query.py check-pulsar --ra {ra} --dec {dec} --radius {radius}",
+    },
+    "check_frb_catalog": {
+        "description": "Cross-check coordinates against known Fast Radio Bursts (FRBCAT + CHIME catalog). A match means the FRB is already cataloged — not novel. Check this before claiming any radio transient discovery.",
+        "usage": "check_frb_catalog(ra=<degrees>, dec=<degrees>, radius=60)",
+        "script": "tools/radio_query.py check-frb --ra {ra} --dec {dec} --radius {radius}",
+    },
     # --- Validation tools: verify candidates before logging ---
     "query_gaia": {
         "description": "Query Gaia DR3 catalog for sources at a position. Returns parallax (distance), proper motion, magnitude, and variability classification. Use to check if a transient candidate is a known variable star or high-proper-motion object.",
@@ -404,9 +430,14 @@ TOOL_TIMEOUTS = {
     "list_images": 10,        # Just listing files
     "convert_to_png": 20,     # FITS conversion
     "log_finding": 5,         # Internal, instant
-    "query_gaia": 20,         # Single Gaia TAP query
+    "query_gaia": 60,         # Gaia TAP query (JOIN on 3 tables can be slow)
     "check_transients": 30,   # ALeRCE API (up to 2 HTTP requests)
     "measure_photometry": 15, # CPU-only aperture photometry
+    "download_radio_spectrum": 90,  # SkyView/FIRST network downloads
+    "analyze_spectrum": 60,         # Radio FITS analysis
+    "check_rfi": 30,                # RFI check (CPU-only)
+    "check_pulsar_catalog": 30,     # VizieR pulsar catalog query
+    "check_frb_catalog": 30,        # VizieR FRB catalog query
 }
 DEFAULT_TOOL_TIMEOUT = 30
 
@@ -644,6 +675,11 @@ _REQUIRED_PARAMS = {
     "simbad_check": ["ra", "dec"],
     "query_gaia": ["ra", "dec"],
     "check_transients": ["ra", "dec"],
+    "download_radio_spectrum": ["ra", "dec"],
+    "analyze_spectrum": ["image"],
+    "check_rfi": ["image"],
+    "check_pulsar_catalog": ["ra", "dec"],
+    "check_frb_catalog": ["ra", "dec"],
     "log_finding": ["ra", "dec", "description"],
     "mark_exhausted": ["ra", "dec"],
     "dismiss_lead": ["ra", "dec"],
@@ -658,6 +694,8 @@ _FILE_PARAMS = {
     "compare_images": ["img1", "img2"],
     "detect_sources": ["image"],
     "analyze_image": ["image"],
+    "analyze_spectrum": ["image"],
+    "check_rfi": ["image"],
 }
 
 # Investigation tools that count toward mark_exhausted readiness
@@ -935,6 +973,11 @@ def execute_tool(tool_name, params, memory=None):
         params.setdefault("aperture", 5)
         params.setdefault("inner", 10)
         params.setdefault("outer", 15)
+    elif tool_name == "download_radio_spectrum":
+        params.setdefault("survey", "vlass")
+        params.setdefault("radius", 5)
+    elif tool_name in ("check_pulsar_catalog", "check_frb_catalog"):
+        params.setdefault("radius", 60)
 
     # Normalize image file paths (Qwen sometimes outputs broken paths)
     for path_key in ("image", "img1", "img2"):
@@ -1181,6 +1224,7 @@ def main():
     seed_index = 0               # next seed target to suggest
     no_progress_count = 0         # consecutive cycles with no useful work
     pending_images = []           # base64 images queued for next call_ollama
+    session_tool_usage = {}       # {tool_name: call_count} — tracks all tools used this session
     
     while True:
         if args.max_cycles > 0 and cycle_num >= args.max_cycles:
@@ -1207,6 +1251,7 @@ def main():
             ztf_blacklist=ztf_blacklist,
             next_seed_target=next_seed,
             memory_summary=mem_summary,
+            session_tool_usage=session_tool_usage,
         )
         
         if args.dry_run:
@@ -1393,6 +1438,7 @@ def main():
                     continue
 
                 log("TOOL", f"{tool_name}|Calling {tool_name}({params})")
+                session_tool_usage[tool_name] = session_tool_usage.get(tool_name, 0) + 1
                 _write_dashboard_status(running=True, cycle=cycle_num, phase="tool", current_tool=tool_name)
                 try:
                     result = execute_tool(tool_name, params, memory=memory)

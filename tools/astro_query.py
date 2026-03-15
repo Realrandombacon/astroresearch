@@ -921,10 +921,10 @@ ORDER BY g.phot_g_mean_mag ASC"""
     }
 
     try:
-        resp = requests.get(tap_url, params=params, timeout=15)
+        resp = requests.get(tap_url, params=params, timeout=45)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
-        return {"error": "Gaia TAP query timed out (15s). Try a smaller radius."}
+        return {"error": "Gaia TAP query timed out (45s). Try a smaller radius."}
     except requests.exceptions.RequestException as e:
         return {"error": f"Gaia TAP query failed: {e}"}
 

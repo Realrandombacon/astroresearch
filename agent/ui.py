@@ -75,6 +75,12 @@ TOOL_STYLE = {
     "query_gaia":      (C.SIMBAD,   "🌟"),
     "check_transients":(C.ZTF,      "🔎"),
     "measure_photometry":(C.DETECT, "📐"),
+    # Radio astronomy tools
+    "download_radio_spectrum": ("\033[38;5;208m", "📡"),  # orange
+    "analyze_spectrum":        ("\033[38;5;209m", "📊"),  # coral
+    "check_rfi":               ("\033[38;5;196m", "🚫"),  # red (RFI = bad)
+    "check_pulsar_catalog":    ("\033[38;5;220m", "💫"),  # gold
+    "check_frb_catalog":       ("\033[38;5;199m", "⚡"),  # hot pink
 }
 
 
@@ -210,6 +216,9 @@ def print_cycle_summary(cycle_num, summary_parts):
             "convert_to_png": "convert_to_png",
             "query_gaia": "query_gaia", "check_transients": "check_transients",
             "measure_photometry": "measure_photometry",
+            "download_radio_spectrum": "download_radio_spectrum",
+            "analyze_spectrum": "analyze_spectrum", "check_rfi": "check_rfi",
+            "check_pulsar_catalog": "check_pulsar_catalog", "check_frb_catalog": "check_frb_catalog",
         }
         matched_tool = None
         for prefix, tname in tool_map.items():
