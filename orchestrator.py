@@ -277,7 +277,11 @@ from agent.ui import C, TOOL_STYLE, _tool_color, log, print_banner, print_cycle_
 # ---------------------------------------------------------------------------
 
 def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, top_p=0.9, images=None):
-    """Call Ollama with think:false for direct structured output.
+    """Call Ollama with think:true so Qwen reasons before responding.
+
+    When think=true, Ollama returns separate 'thinking' and 'content' fields.
+    We log the thinking and combine both into the final output so the parser
+    can extract THOUGHT:/TOOL: from either field.
 
     If images is provided (list of base64 strings), they are included in
     the user message so Qwen can see them inline with full research context.
@@ -294,7 +298,7 @@ def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, top_p=0
             user_message,
         ],
         "stream": False,
-        "think": False,
+        "think": True,
         "options": {
             "temperature": temperature,
             "top_p": top_p,
@@ -302,23 +306,39 @@ def call_ollama(model_name, system_prompt, user_prompt, temperature=0.3, top_p=0
             "num_ctx": 16000,
         },
     }
-    
+
     try:
         t0 = time.time()
         resp = requests.post(OLLAMA_URL, json=payload, timeout=300)
         resp.raise_for_status()
         elapsed = time.time() - t0
-        
+
         data = resp.json()
-        content = data.get("message", {}).get("content", "").strip()
-        
+        msg = data.get("message", {})
+        thinking = msg.get("thinking", "").strip()
+        content = msg.get("content", "").strip()
+
+        # Log thinking if present (truncated for readability)
+        if thinking:
+            think_preview = thinking[:300].replace('\n', ' ')
+            log("THINK_RAW", f"[reasoning] {think_preview}{'...' if len(thinking) > 300 else ''}")
+
+        # Combine: if content is empty, Qwen put everything in thinking
+        # Wrap thinking as THOUGHT: so the parser can extract it
+        if not content and thinking:
+            content = f"THOUGHT: {thinking}"
+        elif thinking and content:
+            # Both present — prepend thinking as THOUGHT: if content doesn't already have one
+            if not content.startswith("THOUGHT:"):
+                content = f"THOUGHT: {thinking}\n{content}"
+
         if not content:
             log("WARN", f"Empty response from Qwen ({elapsed:.1f}s)")
             return None, elapsed
-        
-        log("INFO", f"Qwen responded in {elapsed:.1f}s ({len(content)} chars)")
+
+        log("INFO", f"Qwen responded in {elapsed:.1f}s ({len(content)} chars, thinking={len(thinking)} chars)")
         return content, elapsed
-    
+
     except Exception as e:
         log("ERROR", f"Ollama API error: {e}")
         return None, 0
