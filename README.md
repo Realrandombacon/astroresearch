@@ -40,12 +40,13 @@ The agent runs continuously with no human input. It builds context across cycles
 
 - **Multi-epoch temporal analysis** — downloads individual Pan-STARRS warp exposures spanning years, enabling real transient and variability detection
 - **Cross-survey verification** — compares Pan-STARRS data against DESI Legacy Survey (independent survey, ~5yr baseline) to cross-check candidates
-- **Cross-band guard** — automatically warns when the agent tries to compare different photometric bands (g vs r), which reveals stellar colors not transients
-- **NaN edge artifact filter** — dilated NaN mask rejects false detections near Pan-STARRS tile boundaries in both source detection and epoch comparison
+- **Just-in-time tool call validation** — pre-execution layer catches missing params, fabricated filenames, cross-band errors, and premature region exhaustion before wasting a turn
+- **Tuned LLM parameters** — temperature=0.1 + top_p=0.85 dramatically reduces hallucinated filenames while maintaining coordinate variety
 - **Quality gates on findings** — rejects low-quality discoveries with explanatory feedback (SNR < 3, Δmag < 0.3, missing metadata, duplicates) so the agent learns and retries
-- **Persistent memory** — tracks every region explored, tools used, and outcomes across the entire session
+- **NaN edge artifact filter** — dilated NaN mask rejects false detections near Pan-STARRS tile boundaries in both source detection and epoch comparison
+- **Persistent memory with search** — tracks every region explored, tools used, and outcomes; keyword-searchable across all regions
 - **Crash recovery** — automatic restart on failure with context preservation
-- **Live dashboard** — Flask web UI showing real-time progress, sky coverage, and findings
+- **Live dashboard** — Flask web UI showing real-time progress, sky coverage, findings, and exhausted regions
 
 ## Requirements
 
@@ -75,6 +76,8 @@ python orchestrator.py --max-cycles 50
 --model qwen3.5:4b        Choose Ollama model (default: qwen3.5:4b)
 --max-cycles 0            Run indefinitely (0 = no limit)
 --max-cycles 50           Stop after 50 cycles
+--temperature 0.1         LLM temperature (default: 0.1)
+--top-p 0.85              Nucleus sampling threshold (default: 0.85)
 ```
 
 ### Live dashboard
@@ -88,22 +91,25 @@ The dashboard shows sky coverage maps, finding statistics, tool usage breakdown,
 
 ![Dashboard](docs/dashboard.png)
 
-## Results — First 3-Day Run
+## Results
 
-After ~72 hours of continuous autonomous operation, the agent completed **1500+ cycles** across **1900+ sky regions** (15 sq° sampled). Out of **114 findings** logged, **8 were manually validated** by cross-checking against SIMBAD (60"), Gaia DR3 (5"), and ALeRCE/ZTF — all confirmed as **genuinely uncatalogued variable sources**.
+After continuous autonomous operation, the agent has completed **1500+ cycles** across **1900+ sky regions**. Out of **78 findings** logged (after automated and manual quality filtering), **9 were manually validated** by cross-checking against SIMBAD (60"), Gaia DR3 (5"), and ALeRCE/ZTF — all confirmed as **genuinely uncatalogued variable sources**.
 
-### Top 6 Validated Discoveries
+### Top Validated Discoveries
 
 | Rank | Finding | RA, Dec | Δmag | Band | SNR | Distance | Why it's interesting |
 |------|---------|---------|------|------|-----|----------|---------------------|
 | ⭐ | F190738 | 270.41, +0.02 | 0.92 | r | 648→518 | Not in Gaia | Highest SNR of entire project. Absent from ALL catalogues. |
 | 🔥 | F174748 | 94.97, -2.63 | 0.97 | g | — | ~4.5 kpc | Nearly 1 mag brightening. RUWE=1.008 (pristine). |
-| 3 | F014312 | 106.90, +49.63 | 0.70 | r | 224→524 | ~1.2 kpc | First validated find. Uncatalogued F/G variable star. |
-| 4 | F001930 | 304.53, +50.30 | 0.69 | g | 127→284 | ~2.4 kpc | SNR doubled between epochs. Clean astrometry. |
-| 5 | F173217 | 190.12, -6.65 | 0.68 | g | 29→81 | Not in Gaia | SNR tripled. Absent from all catalogues. Possibly extragalactic. |
-| 6 | F122946 | 0.91, -17.03 | 0.35 | r | 246→290 | Not in Gaia | Best photometry (errors < 0.005 mag). |
+| 3 | F165906 | 311.14, -9.60 | 0.89 | g | 114→223 | ~1.5 kpc | Perfect astrometry (RUWE=1.0). SNR doubled. |
+| 4 | F014312 | 106.90, +49.63 | 0.70 | r | 224→524 | ~1.2 kpc | First validated find. Uncatalogued F/G variable star. |
+| 5 | F001930 | 304.53, +50.30 | 0.69 | g | 127→284 | ~2.4 kpc | SNR doubled between epochs. Clean astrometry. |
+| 6 | F173217 | 190.12, -6.65 | 0.68 | g | 29→81 | Not in Gaia | SNR tripled. Absent from all catalogues. Possibly extragalactic. |
+| 7 | F170853 | 29.76, +69.92 | 0.39 | r | >160 | ~5.6 kpc | Very distant source. RUWE=0.996. |
+| 8 | F121340 | 139.02, -21.81 | 0.38 | r | 148→192 | Not in Gaia | Absent from all catalogues. Low proper motion. |
+| 9 | F122946 | 0.91, -17.03 | 0.35 | r | 246→290 | Not in Gaia | Best photometry (errors < 0.005 mag). |
 
-All 6 sources show real brightness changes (Δmag > 0.3) over multi-year baselines, with zero matches in SIMBAD, no variability classification in Gaia, and no prior detections in ZTF/ALeRCE. Full cross-check details are in [`validated_by_claude.md`](validated_by_claude.md).
+All 9 sources show real brightness changes (Δmag ≥ 0.3) over multi-year baselines, with zero matches in SIMBAD, no variability classification in Gaia, and no prior detections in ZTF/ALeRCE. Full cross-check details are in [`validated_by_claude.md`](validated_by_claude.md).
 
 ## Project structure
 
@@ -181,6 +187,7 @@ autoresearch/
 | `my_stats` | Global performance dashboard — findings, coverage, tool usage |
 | `dismiss_lead` | Mark a priority lead as resolved (stop revisiting) |
 | `add_note` | Write a note to future self about a region |
+| `search_memory` | Keyword search across all explored regions (notes, outcomes, tools) |
 | `mark_exhausted` | Flag a region as fully analyzed (deprioritize) |
 
 ## How the agent thinks

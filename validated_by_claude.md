@@ -213,6 +213,19 @@ Manual cross-check against SIMBAD (60"), Gaia DR3 (30"), and ALeRCE/ZTF (30").
 
 ---
 
+## VALID — F20260315_165906
+
+- **Coordinates:** RA 311.138734, Dec -9.601177
+- **Signal:** g-band brightening 17.557 → 16.671 (Δm = 0.89 mag)
+- **Epochs:** MJD 55422.3 → 56506.5 (~1084 days / ~3.0 years)
+- **Photometry:** SNR 114 → 223
+- **SIMBAD 60":** 0 matches
+- **Gaia DR3 10":** 1 source at 0.26" — G=15.991, parallax=0.649 mas (~1.5 kpc), pmTotal=4.27 mas/yr, BP-RP=0.866, RUWE=1.0, variable_class=NOT_AVAILABLE
+- **ALeRCE:** 0 matches
+- **Verdict:** Distant source (~1.5 kpc), perfect astrometry (RUWE=1.0), low proper motion. Nearly 1 mag brightening with SNR doubling. Completely uncatalogued variable. Strong candidate.
+
+---
+
 ## Summary
 
 | Finding | Δmag | SNR | Catalogues | Verdict |
@@ -233,4 +246,5 @@ Manual cross-check against SIMBAD (60"), Gaia DR3 (30"), and ALeRCE/ZTF (30").
 | F173217 | 0.68 | 29→81 | 0 SIMBAD, 0 Gaia, 0 ZTF | **VALID** |
 | F090737 | 0.48 | 290→392 | UCAC4 372-178672 at 0", G=12.3 | **INVALIDATED** |
 | F174748 | 0.97 | — | 0 SIMBAD, Gaia 4.5kpc no var, 0 ZTF | **VALID** |
+| F165906 | 0.89 | 114→223 | 0 SIMBAD, Gaia 1.5kpc no var, 0 ZTF | **VALID** |
 | F142349 | 0.78 | — | 0 SIMBAD, Gaia pm=15.7 | **DOWNGRADED** |
